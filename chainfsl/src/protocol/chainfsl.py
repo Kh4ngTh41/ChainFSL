@@ -342,6 +342,8 @@ class ChainFSLProtocol:
             Dict[node_id] -> config dict, or None if node is excluded (OOM).
         """
         configs: Dict[int, Optional[Dict[str, Any]]] = {}
+
+        if not self.haso_enabled or self.agent_pool is None:
             # Ablation: fixed uniform cut layer 2
             for node in self.nodes:
                 configs[node.node_id] = {
@@ -369,16 +371,17 @@ class ChainFSLProtocol:
             node_id = n.node_id
             cut_layer = decision["cut_layer"]
 
-            # Enforce tier memory constraint
-            memory_map = SplittableResNet18.MEMORY_ESTIMATES_MB
-            if not n.can_fit_cut_layer(cut_layer, memory_map):
-                # Fall back to deepest cut that fits
-                for cl in sorted(memory_map.keys(), reverse=True):
-                    if n.can_fit_cut_layer(cl, memory_map):
-                        cut_layer = cl
-                        break
-                else:
-                    cut_layer = 1
+            # Enforce tier memory constraint (includes optimizer state for training)
+            memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+            valid_cut = self._find_deepest_valid_cut_layer(n, memory_map)
+
+            if valid_cut is None:
+                # Node cannot fit any cut layer — exclude from this round
+                configs[node_id] = None
+                continue
+
+            # Clamp chosen cut_layer to deepest valid; HASO will learn from this
+            cut_layer = valid_cut
 
             configs[node_id] = {
                 "cut_layer": cut_layer,
@@ -408,17 +411,18 @@ class ChainFSLProtocol:
         train_losses: Dict[int, float] = {}
 
         def train_node(node: HardwareProfile) -> Optional[tuple]:
-            cfg = configs.get(node.node_id, {})
+            cfg = configs.get(node.node_id)
             if cfg is None:
+                # Node was excluded from this round (OOM)
                 return None
 
             cut_layer = cfg.get("cut_layer", 2)
             batch_size = cfg.get("batch_size", 32)
             H = cfg.get("H", 1)
 
-            # Memory enforcement
-            if not node.can_fit_cut_layer(cut_layer, SplittableResNet18.MEMORY_ESTIMATES_MB):
-                cut_layer = 1
+            # Final safety check against MEMORY_WITH_ADAM_MB
+            if not node.can_fit_cut_layer(cut_layer, SplittableResNet18.MEMORY_WITH_ADAM_MB):
+                return None  # Skip this node — cannot train safely
 
             # Create trainer for this node
             trainer = SFLTrainer(

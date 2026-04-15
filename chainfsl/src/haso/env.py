@@ -21,6 +21,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from ..emulator.node_profile import HardwareProfile, RESNET18_MEMORY_MAP
 from ..emulator.network_emulator import GossipProtocol
+from ..sfl.models import SplittableResNet18
 
 
 class SFLNodeEnv(gym.Env):
@@ -144,7 +145,23 @@ class SFLNodeEnv(gym.Env):
         batch_size = self.BATCH_SIZES[batch_size_idx]
         H = self.H_CHOICES[H_idx]
 
-        # Validate action against memory constraint
+        # Validate action against memory constraint (includes optimizer state)
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+        valid_cut = self._find_deepest_valid_cut_layer(memory_map)
+
+        if valid_cut is None:
+            # Node cannot train at any cut layer — severe penalty, terminate step
+            terminated = True
+            reward = -100.0  # Large penalty for OOM condition
+            info = {
+                "cut_layer": 0, "batch_size": 0, "H": 0,
+                "target_node": target_node, "T_comp": 0, "T_comm": 0,
+                "delta_F": 0, "shapley_ema": self._shapley_ema,
+                "oom": True, "error": "Node cannot fit any cut layer",
+            }
+            return self._get_obs(), float(reward), terminated, False, info
+
+        # Clamp to deepest valid cut
         cut_layer, batch_size = self._apply_memory_constraint(cut_layer, batch_size)
 
         # Compute resource cost (T_comp + T_comm)
@@ -229,24 +246,40 @@ class SFLNodeEnv(gym.Env):
     # Resource computation
     # --------------------------------------------------------------------- #
 
-    def _apply_memory_constraint(self, cut_layer: int, batch_size: int) -> Tuple[int, int]:
-        """Clamp cut_layer and batch_size to fit node memory."""
-        if not self.profile.can_fit_cut_layer(cut_layer, self.memory_map):
-            # Fall back to shallowest cut that fits
-            for cl in sorted(self.memory_map.keys()):
-                if self.profile.can_fit_cut_layer(cl, self.memory_map):
-                    cut_layer = cl
-                    break
-            else:
-                cut_layer = 1
+    def _find_deepest_valid_cut_layer(self, memory_map: dict) -> Optional[int]:
+        """
+        Find deepest cut_layer that fits node RAM, including optimizer state.
 
-        # Reduce batch size if still doesn't fit
+        Returns None if no cut layer fits (node cannot train).
+        """
+        for cl in sorted(memory_map.keys(), reverse=True):
+            if self.profile.can_fit_cut_layer(cl, memory_map):
+                return cl
+        return None
+
+    def _apply_memory_constraint(self, cut_layer: int, batch_size: int) -> Tuple[int, int]:
+        """Clamp cut_layer and batch_size to fit node memory (with Adam optimizer state)."""
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+
+        # First, find deepest valid cut layer
+        valid_cut = self._find_deepest_valid_cut_layer(memory_map)
+        if valid_cut is None:
+            # Node cannot fit any cut layer — return invalid sentinel
+            # The step() function will handle this by skipping training
+            return cut_layer, batch_size
+
+        # Clamp to deepest valid
+        if not self.profile.can_fit_cut_layer(cut_layer, memory_map):
+            cut_layer = valid_cut
+
+        # Reduce batch size if needed to stay within 50% RAM
         for bs in self.BATCH_SIZES:
             if bs <= batch_size:
                 required = self._estimate_activation_mb(cut_layer, bs)
-                if required <= self.profile.ram_mb * 0.5:  # keep within 50% of RAM
+                if required <= self.profile.ram_mb * 0.5:
                     batch_size = bs
                     break
+
         return cut_layer, batch_size
 
     def _compute_time_comp(self, cut_layer: int, batch_size: int) -> float:
@@ -335,12 +368,14 @@ class SFLNodeEnv(gym.Env):
 
         Returns:
             Boolean mask of shape (4,) indicating which actions are valid.
+            Uses MEMORY_WITH_ADAM_MB (includes optimizer state).
         """
         mask = np.array([True, True, True, True], dtype=bool)
 
-        # Cut layer must fit in memory
+        # Cut layer must fit in memory (including Adam optimizer state)
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
         for i, cl in enumerate(self.CUT_LAYERS):
-            if not self.profile.can_fit_cut_layer(cl, self.memory_map):
+            if not self.profile.can_fit_cut_layer(cl, memory_map):
                 mask[0] = False
                 break
 
