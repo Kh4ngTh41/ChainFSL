@@ -76,6 +76,7 @@ def build_config(
         "ppo_learning_rate": 3e-4,
         "ppo_n_steps": 256,
         "ppo_batch_size": 64,
+        "ppo_update_timesteps": 256,  # timesteps per RL update per round (was 64, too little)
         "reward_alpha": 1.0,
         "reward_beta": 0.5,
         "reward_gamma": 0.1,

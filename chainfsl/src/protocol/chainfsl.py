@@ -652,7 +652,10 @@ class ChainFSLProtocol:
             return
 
         self.agent_pool.update_shapley_all(shapley_vals)
-        self.agent_pool.learn_all(total_timesteps=64)
+        # PPO needs sufficient timesteps to learn. 64 is far too little.
+        # Use configurable ppo_update_timesteps from config (default 256)
+        update_ts = self.cfg.get("ppo_update_timesteps", 256)
+        self.agent_pool.learn_all(total_timesteps=update_ts)
 
     # -------------------------------------------------------------------------
     # Metrics & evaluation
