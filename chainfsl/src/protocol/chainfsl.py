@@ -310,16 +310,38 @@ class ChainFSLProtocol:
     # Phase 1: HASO decisions
     # -------------------------------------------------------------------------
 
-    def _phase_haso(self) -> Dict[int, Dict[str, Any]]:
+    def _find_deepest_valid_cut_layer(
+        self,
+        node: HardwareProfile,
+        memory_map: dict[int, float],
+    ) -> Optional[int]:
+        """
+        Find the deepest (largest cut_layer) that fits in node's RAM.
+
+        Uses MEMORY_WITH_ADAM_MB — includes optimizer state (3x gradients).
+        Returns None if no cut layer fits (node must be excluded from this round).
+
+        Args:
+            node: HardwareProfile of the node.
+            memory_map: Memory requirement map (cut_layer -> MB).
+
+        Returns:
+            Deepest valid cut_layer, or None if no cut fits.
+        """
+        # Sort cut layers deepest-first (4, 3, 2, 1)
+        for cl in sorted(memory_map.keys(), reverse=True):
+            if node.can_fit_cut_layer(cl, memory_map):
+                return cl
+        return None  # No valid cut layer — exclude node
+
+    def _phase_haso(self) -> Dict[int, Optional[Dict[str, Any]]]:
         """
         Phase 1: Each node observes state and decides (cut_layer, batch_size, H, target_node).
 
         Returns:
-            Dict[node_id] -> config dict.
+            Dict[node_id] -> config dict, or None if node is excluded (OOM).
         """
-        configs = {}
-
-        if not self.haso_enabled or self.agent_pool is None:
+        configs: Dict[int, Optional[Dict[str, Any]]] = {}
             # Ablation: fixed uniform cut layer 2
             for node in self.nodes:
                 configs[node.node_id] = {
