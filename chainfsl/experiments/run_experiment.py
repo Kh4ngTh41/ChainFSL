@@ -136,6 +136,16 @@ Examples:
         action="store_true",
         help="Skip baseline comparisons (E1 only)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from latest checkpoint in checkpoint_dir",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        default="./checkpoints",
+        help="Directory for checkpoint files",
+    )
     return parser.parse_args()
 
 
@@ -171,6 +181,17 @@ def run_exp(exp_name: str, args) -> None:
 
     # Ensure log dir
     ensure_dir(args.log_dir)
+    ensure_dir(args.checkpoint_dir)
+
+    # Resume from checkpoint if requested
+    if args.resume:
+        checkpoint_path = _get_latest_checkpoint(args.checkpoint_dir, exp_name)
+        if checkpoint_path:
+            print(f"[{exp_name}] Resuming from checkpoint: {checkpoint_path}")
+            # Note: actual resume logic depends on experiment module support
+            # The experiment module's run() function should handle resume
+        else:
+            print(f"[{exp_name}] No checkpoint found in {args.checkpoint_dir}, starting fresh")
 
     # Dispatch
     module = EXPERIMENT_MAP[exp_name]
@@ -179,16 +200,37 @@ def run_exp(exp_name: str, args) -> None:
         module.run(
             config,
             skip_baselines=getattr(args, "skip_baselines", False),
+            resume=args.resume,
+            checkpoint_dir=args.checkpoint_dir,
         )
     elif exp_name == "e6":
         module.run(
             config,
             ablation_type=args.ablation,
+            resume=args.resume,
+            checkpoint_dir=args.checkpoint_dir,
         )
     else:
-        module.run(config)
+        module.run(
+            config,
+            resume=args.resume,
+            checkpoint_dir=args.checkpoint_dir,
+        )
 
     print(f"[{exp_name}] Done!")
+
+
+def _get_latest_checkpoint(checkpoint_dir: str, exp_name: str) -> str:
+    """Find latest checkpoint for an experiment."""
+    import os
+    prefix = f"{exp_name}_checkpoint_"
+    if not os.path.exists(checkpoint_dir):
+        return ""
+    files = [f for f in os.listdir(checkpoint_dir) if f.startswith(prefix) and f.endswith(".pkl")]
+    if not files:
+        return ""
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)))
+    return os.path.join(checkpoint_dir, files[-1])
 
 
 def main():
@@ -202,6 +244,9 @@ def main():
     else:
         run_exp(args.exp, args)
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Tuple
 from collections import defaultdict
 
-from .vrf import MockVRF, select_committee, reputation_adjusted_threshold
+from .vrf import MockVRF, select_committee, select_committee_reputation, reputation_adjusted_threshold
 from .commitment import Proof, CommitmentVerifier
 
 from ..emulator.node_profile import HardwareProfile

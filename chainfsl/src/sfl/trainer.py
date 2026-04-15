@@ -93,7 +93,6 @@ class SFLTrainer:
 
         # --- Phase 2: Send smash data (simulated as gradient hook) ---
         t_comm_start = time.perf_counter()
-        smash_data.requires_grad_(True)
         t_comm = t_comm_start - t_comp_start  # Would be actual comm in distributed
 
         # --- Phase 3: Server forward-backward ---

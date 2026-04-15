@@ -387,7 +387,7 @@ class SFLNodeEnv(gym.Env):
             "cut_layer": self.CUT_LAYERS[int(action[0])],
             "batch_size": self.BATCH_SIZES[int(action[1])],
             "H": self.H_CHOICES[int(action[2])],
-            "target_node": int(action[3]),
+            "target_compute_node": int(action[3]),
         }
 
 

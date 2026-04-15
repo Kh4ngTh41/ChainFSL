@@ -104,7 +104,7 @@ class SplittableResNet18(nn.Module):
         Returns:
             nn.Sequential containing server layers (avgpool through fc).
         """
-        if cut_layer >= 4:
+        if cut_layer > 4:
             # Nothing left for server
             return nn.Sequential(nn.Identity())
 
@@ -167,8 +167,19 @@ class SplittableResNet18(nn.Module):
         return channels_h_w * batch_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Standard forward (no split)."""
-        return super().forward(x)
+        """Standard forward (no split) through full model."""
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -193,50 +204,82 @@ class ClientModel:
         self.backbone = backbone
         self.cut_layer = cut_layer
         self.optimizer = optimizer_cls(backbone.parameters(), lr=lr, momentum=momentum)
-        self._last_activation: Optional[torch.Tensor] = None
+        self._saved_activation: Optional[torch.Tensor] = None
+        self._saved_input: Optional[torch.Tensor] = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass to cut layer.
 
         Returns:
-            Smashed data (activation tensor) detached for transmission.
+            Smashed data (activation tensor) — fully detached, no autograd graph.
         """
-        with torch.enable_grad():
+        with torch.no_grad():
+            self._saved_input = x.detach().clone()
             a = self.backbone(x)
-        self._last_activation = a
-        return a.detach().requires_grad_(True)
+        # Clone and ensure contiguous — no requires_grad, no graph connection
+        self._saved_activation = a.clone().contiguous()
+        return self._saved_activation
 
     def backward(self, grad_a: torch.Tensor) -> None:
         """
-        Backward pass using gradient from server.
+        Apply gradient from server to update client parameters.
+
+        In split learning, grad_a is dL/d(activation) from server.
+        We need to compute dL/d(params) using chain rule through activation.
 
         Args:
-            grad_a: Gradient of loss w.r.t. smashed activation.
+            grad_a: Gradient of loss w.r.t. smashed activation (from server).
         """
         self.optimizer.zero_grad()
-        if self._last_activation is not None and self._last_activation.grad is not None:
-            self._last_activation.backward(grad_a)
-        elif self._last_activation is not None:
-            self._last_activation.backward(grad_a)
+
+        if self._saved_input is None or self._saved_activation is None or grad_a is None:
+            self.optimizer.step()
+            self._saved_input = None
+            self._saved_activation = None
+            return
+
+        # Rebuild computation graph: input → ... → activation
+        x = self._saved_input.detach().requires_grad_(True)
+
+        with torch.set_grad_enabled(True):
+            output = self.backbone(x)
+            # Compute dL/d(params) via chain rule through actual forward graph
+            # grad_outputs=grad_a connects server's upstream gradient at output
+            params = list(self.backbone.parameters())
+            grads = torch.autograd.grad(
+                outputs=[output],
+                inputs=params,
+                grad_outputs=[grad_a.to(output.device)],
+                retain_graph=False,
+            )
+            # Manually set gradients on optimizer
+            for p, g in zip(params, grads):
+                if p.grad is not None:
+                    p.grad.add_(g)
+                else:
+                    p.grad = g
+
         self.optimizer.step()
+        self._saved_input = None
+        self._saved_activation = None
 
     def update(self, gradients: torch.Tensor) -> None:
-        """
-        Apply gradients directly to parameters (alternative to backward).
-
-        Args:
-            gradients: Gradient tensor from server.
-        """
+        """Direct gradient application (unused in SFL flow)."""
         self.optimizer.zero_grad()
-        if self._last_activation is not None:
-            self._last_activation.backward(gradients)
+        if self._saved_activation is not None and gradients is not None:
+            torch.autograd.backward(
+                tensors=[self._saved_activation.detach()],
+                grad_tensors=[gradients],
+            )
         self.optimizer.step()
+        self._saved_activation = None
 
     @property
     def device(self) -> torch.device:
         """Device of the underlying model."""
-        return next(self.backbone.parameters()).device
+        params = list(self.backbone.parameters())
+        return torch.device("cpu") if not params else params[0].device
 
 
 class ServerModel:
@@ -257,7 +300,11 @@ class ServerModel:
     ):
         self.backbone = backbone
         self.criterion = criterion or nn.CrossEntropyLoss()
-        self.optimizer = optimizer_cls(backbone.parameters(), lr=lr, momentum=momentum)
+        params = list(backbone.parameters())
+        if not params:
+            self.optimizer = None  # No parameters (e.g., Identity placeholder for cut_layer=4)
+        else:
+            self.optimizer = optimizer_cls(params, lr=lr, momentum=momentum)
 
     def forward_backward(
         self, smashed: torch.Tensor, labels: torch.Tensor
@@ -272,15 +319,25 @@ class ServerModel:
         Returns:
             (loss_value, gradient_at_cut_layer) tuple.
         """
-        self.optimizer.zero_grad()
-        smashed = smashed.requires_grad_(True)
-        output = self.model(smashed)
-        loss = self.criterion(output, labels)
-        loss.backward()
-        self.optimizer.step()
+        # All autograd computation inside one isolated context
+        with torch.set_grad_enabled(True):
+            smashed_input = smashed.detach().clone().requires_grad_(True)
+            dev = self.device
+            if smashed_input.device != dev:
+                smashed_input = smashed_input.to(dev)
 
-        grad = smashed.grad.detach() if smashed.grad is not None else torch.zeros_like(smashed)
-        return loss.item(), grad
+            output = self.model(smashed_input)
+            loss = self.criterion(output, labels)
+
+            # Compute d(loss)/d(smashed_input) correctly
+            # Use outputs=[loss] and let backward compute proper gradients
+            grad = torch.autograd.grad(
+                outputs=[loss],
+                inputs=[smashed_input],
+                retain_graph=False,
+            )[0]
+
+        return loss.item(), grad.detach()
 
     @property
     def model(self) -> nn.Module:
@@ -288,7 +345,8 @@ class ServerModel:
 
     @property
     def device(self) -> torch.device:
-        return next(self.backbone.parameters()).device
+        params = list(self.backbone.parameters())
+        return torch.device("cpu") if not params else params[0].device
 
 
 # ---------------------------------------------------------------------------

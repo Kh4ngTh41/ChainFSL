@@ -66,15 +66,17 @@ class HASOGossip:
         Returns:
             Best target node_id, or None if no neighbors.
         """
-        neighbors = self._protocol.get_neighbors(node_id, k=k)
-        if not neighbors:
+        # Build candidate list from the shared table: (node_id, lrh)
+        all_candidates = [
+            (nid, info) for nid, info in self._protocol._table.items()
+            if nid != node_id or not exclude_self
+        ]
+        if not all_candidates:
             return None
 
         # Pick neighbor with highest reputation
-        best = max(neighbors, key=lambda n: n.get("reputation", 0.0))
-        # We don't have direct mapping from LRH to node_id without reverse lookup
-        # For simplicity: return index-based ranking
-        return None  # Override with actual lookup in real implementation
+        best_nid, _ = max(all_candidates, key=lambda x: x[1].get("reputation", 0.0))
+        return best_nid
 
     def update_from_chainfsl(self, gossip_protocol: GossipProtocol) -> None:
         """

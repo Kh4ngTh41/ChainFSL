@@ -219,6 +219,8 @@ class BlockchainLedger:
         with self._lock:
             with self._get_conn() as conn:
                 ts = time.time()
+                # Delete existing block for this epoch if any, then insert
+                conn.execute("DELETE FROM blocks WHERE epoch=?", (epoch,))
                 cursor = conn.execute(
                     "INSERT INTO blocks (epoch, merkle_root, n_verified, timestamp) VALUES (?,?,?,?)",
                     (epoch, merkle_root, n_verified, ts),

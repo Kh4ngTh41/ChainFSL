@@ -40,13 +40,20 @@ from experiments.utils import (
 TARGET_ACCURACY = 60.0  # Target accuracy % for time-to-accuracy measurement
 
 
-def run(config: Dict[str, Any], skip_baselines: bool = False) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    skip_baselines: bool = False,
+    resume: bool = False,
+    checkpoint_dir: str = "./checkpoints",
+) -> Dict[str, Any]:
     """
     Run E1 experiment.
 
     Args:
         config: Base config dict.
         skip_baselines: If True, skip baseline comparisons.
+        resume: If True, resume from latest checkpoint.
+        checkpoint_dir: Directory for checkpoint files.
 
     Returns:
         Dict of results for each method.
@@ -107,7 +114,11 @@ def run(config: Dict[str, Any], skip_baselines: bool = False) -> Dict[str, Any]:
 
 def _run_chainfsl(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Run ChainFSL protocol."""
-    db_path = f'/tmp/chainfsl_e1_{config["seed"]}.db'
+    import os
+    # Use log_dir for ledger DB to ensure Windows compatibility
+    log_dir = config.get("log_dir", "./logs")
+    os.makedirs(log_dir, exist_ok=True)
+    db_path = os.path.join(log_dir, f"chainfsl_e1_{config['seed']}.db")
 
     protocol = ChainFSLProtocol(
         config=config,

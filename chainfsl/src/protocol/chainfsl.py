@@ -47,6 +47,10 @@ from ..gtm.tokenomics import TokenomicsEngine, TokenomicsConfig, NashValidator
 
 from ..blockchain.ledger import BlockchainLedger
 
+from ..utils.metrics import compute_metrics, jains_fairness, gini_coefficient
+from ..utils.checkpoint import save_checkpoint, load_checkpoint, checkpoint_exists, get_latest_checkpoint
+from ..utils.progress import ProgressTracker, NodeProgressInfo
+
 
 # ---------------------------------------------------------------------------
 # Metrics
@@ -84,6 +88,49 @@ class RoundMetrics:
             "shapley_variance": self.shapley_variance,
             "mean_verification_ms": self.mean_verification_ms,
             "ledger_size_kb": self.ledger_size_kb,
+        }
+
+
+@dataclass
+class NodeProgress:
+    """Per-node progress tracking across rounds."""
+    node_id: int
+    current_round: int = 0          # Last completed round
+    total_epochs_trained: int = 0     # Cumulative local epochs trained
+    local_epochs_this_round: int = 0 # Epochs trained in current round
+    cut_layer: int = 2               # Current cut layer assignment
+    batch_size: int = 32             # Current batch size
+    last_loss: float = 0.0           # Loss from most recent training
+    cumulative_loss: float = 0.0     # Sum of all losses
+    times_excluded: int = 0          # How many times node was excluded (OOM)
+    last_reward: float = 0.0         # Most recent reward received
+    cumulative_reward: float = 0.0   # Sum of all rewards
+    completed: bool = False           # True when node finished all rounds
+
+    @property
+    def mean_loss(self) -> float:
+        denom = self.total_epochs_trained if self.total_epochs_trained > 0 else 1
+        return self.cumulative_loss / denom
+
+    @property
+    def mean_reward(self) -> float:
+        rounds = max(self.current_round, 1)
+        return self.cumulative_reward / rounds
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "current_round": self.current_round,
+            "total_epochs_trained": self.total_epochs_trained,
+            "local_epochs_this_round": self.local_epochs_this_round,
+            "cut_layer": self.cut_layer,
+            "batch_size": self.batch_size,
+            "last_loss": self.last_loss,
+            "mean_loss": self.mean_loss,
+            "times_excluded": self.times_excluded,
+            "last_reward": self.last_reward,
+            "cumulative_reward": self.cumulative_reward,
+            "completed": self.completed,
         }
 
 
@@ -145,7 +192,7 @@ class ChainFSLProtocol:
         ).to(self.device)
 
         # --- Data loaders ---
-        self.train_loaders = get_dataloaders(
+        self.train_loaders, _, self.test_dataset = get_dataloaders(
             dataset_name=config.get("dataset", "cifar10"),
             n_clients=self.n_nodes,
             alpha=config.get("dirichlet_alpha", 0.5),
@@ -197,10 +244,9 @@ class ChainFSLProtocol:
         # --- GTM ---
         self.gtm_enabled = config.get("gtm_enabled", True)
         tokenomics_config = TokenomicsConfig(
-            initial_base_reward=config.get("reward_total_init", 1000.0),
-            min_base_reward=config.get("reward_min", 10.0),
-            halving_rounds=config.get("halving_rounds", 50),
-            decay_rate=1.0 - (1.0 / config.get("halving_rounds", 50)),
+            R0=config.get("reward_total_init", 1000.0),
+            R_min=config.get("reward_min", 10.0),
+            T_halving=config.get("halving_rounds", 50),
         )
         self.tokenomics = TokenomicsEngine(tokenomics_config)
         self.shapley_config = ShapleyConfig(
@@ -227,6 +273,7 @@ class ChainFSLProtocol:
         self.current_round = 0
         self.node_staleness: Dict[int, int] = {n.node_id: 0 for n in self.nodes}
         self.node_losses: Dict[int, float] = {n.node_id: 0.0 for n in self.nodes}
+        self.verification_rates: Dict[int, float] = {n.node_id: 1.0 for n in self.nodes}
 
         # --- Attack injection (E4) ---
         n_lazy = int(config.get("lazy_client_fraction", 0.0) * self.n_nodes)
@@ -235,6 +282,9 @@ class ChainFSLProtocol:
 
         # --- Tracking ---
         self.metrics_history: List[RoundMetrics] = []
+        self.node_progress: Dict[int, NodeProgress] = {
+            n.node_id: NodeProgress(node_id=n.node_id) for n in self.nodes
+        }
 
         # --- Sync lock ---
         self._lock = threading.Lock()
@@ -282,7 +332,7 @@ class ChainFSLProtocol:
             self._phase_blockchain(verif_results, rewards, shapley_vals)
 
             # Phase 8: HASO policy update
-            self._phase_haso_update(shapley_vals)
+            self._phase_haso_update(shapley_vals, rewards)
 
             # Metrics
             elapsed = time.perf_counter() - round_start
@@ -330,7 +380,8 @@ class ChainFSLProtocol:
         """
         # Sort cut layers deepest-first (4, 3, 2, 1)
         for cl in sorted(memory_map.keys(), reverse=True):
-            if node.can_fit_cut_layer(cl, memory_map):
+            required = memory_map.get(cl, float("inf"))
+            if required <= node.ram_mb:
                 return cl
         return None  # No valid cut layer — exclude node
 
@@ -411,73 +462,108 @@ class ChainFSLProtocol:
         train_losses: Dict[int, float] = {}
 
         def train_node(node: HardwareProfile) -> Optional[tuple]:
-            cfg = configs.get(node.node_id)
-            if cfg is None:
-                # Node was excluded from this round (OOM)
-                return None
+            try:
+                cfg = configs.get(node.node_id)
+                if cfg is None:
+                    # Node was excluded from this round (OOM)
+                    progress = self.node_progress.get(node.node_id)
+                    if progress:
+                        progress.times_excluded += 1
+                    return None
 
-            cut_layer = cfg.get("cut_layer", 2)
-            batch_size = cfg.get("batch_size", 32)
-            H = cfg.get("H", 1)
+                cut_layer = cfg.get("cut_layer", 2)
+                batch_size = cfg.get("batch_size", 32)
+                H = cfg.get("H", 1)
 
-            # Final safety check against MEMORY_WITH_ADAM_MB
-            if not node.can_fit_cut_layer(cut_layer, SplittableResNet18.MEMORY_WITH_ADAM_MB):
-                return None  # Skip this node — cannot train safely
+                # Final safety check against MEMORY_WITH_ADAM_MB
+                if not node.can_fit_cut_layer(cut_layer, SplittableResNet18.MEMORY_WITH_ADAM_MB):
+                    return None  # Skip this node — cannot train safely
 
-            # Create trainer for this node
-            trainer = SFLTrainer(
-                node_id=node.node_id,
-                model=self.model,
-                cut_layer=cut_layer,
-                device=self.device,
-            )
-            self.trainers[node.node_id] = trainer
-
-            # Sync from global state
-            trainer.sync_from_global(self.global_state, cut_layer)
-
-            # Run H local epochs
-            loader = self.train_loaders[node.node_id]
-            avg_loss, _ = trainer.local_epochs(loader, H=H, verbose=False)
-
-            # Client/server state for aggregation
-            client_state = trainer.get_client_state()
-            server_state = trainer.get_server_state()
-
-            # Compute smashed data size for comm time estimation
-            smashed_bytes = SplittableResNet18.smashed_data_size(cut_layer, batch_size)
-
-            # Build update dict
-            update = {
-                "node_id": node.node_id,
-                "cut_layer": cut_layer,
-                "batch_size": batch_size,
-                "client_state": client_state,
-                "server_state": server_state,
-                "data_size": len(loader.dataset),
-                "staleness": self.node_staleness.get(node.node_id, 0),
-                "input_hash": self._hash_state(client_state),
-                "smashed_bytes": smashed_bytes,
-                "loss": avg_loss,
-                "gradient_norm": 0.0,  # populated below
-            }
-
-            # Generate TVE proof based on tier
-            proof = self._generate_proof(node, trainer, cut_layer)
-            self._proof_cache[node.node_id] = proof
-
-            # Lazy client attack injection (E4)
-            if node.node_id in self.lazy_node_ids:
-                # Submit random proof — will fail verification
-                proof = CommitmentVerifier.gen_proof_tier3(
-                    torch.randn(1, 3, 224, 224),
-                    torch.randn(1, 64, 56, 56),
+                # Create trainer for this node
+                trainer = SFLTrainer(
+                    node_id=node.node_id,
+                    model=self.model,
+                    cut_layer=cut_layer,
+                    device=self.device,
                 )
+                self.trainers[node.node_id] = trainer
 
-            train_losses[node.node_id] = avg_loss
-            self.node_losses[node.node_id] = avg_loss
+                # Sync from global state
+                trainer.sync_from_global(self.global_state, cut_layer)
 
-            return update, proof
+                # Run H local epochs
+                loader = self.train_loaders[node.node_id]
+                avg_loss, _ = trainer.local_epochs(loader, H=H, verbose=False)
+
+                # Client/server state for aggregation
+                client_state = trainer.get_client_state()
+                server_state = trainer.get_server_state()
+
+                # Compute smashed data size for comm time estimation
+                smashed_bytes = SplittableResNet18.smashed_data_size(cut_layer, batch_size)
+
+                # Build update dict
+                update = {
+                    "node_id": node.node_id,
+                    "cut_layer": cut_layer,
+                    "batch_size": batch_size,
+                    "client_state": client_state,
+                    "server_state": server_state,
+                    "data_size": len(loader.dataset),
+                    "staleness": self.node_staleness.get(node.node_id, 0),
+                    "input_hash": self._hash_state(client_state),
+                    "smashed_bytes": smashed_bytes,
+                    "loss": avg_loss,
+                    "gradient_norm": 0.0,  # populated below
+                }
+
+                # Generate TVE proof based on tier
+                proof = self._generate_proof(node, trainer, cut_layer)
+                self._proof_cache[node.node_id] = proof
+
+                # Lazy client attack injection (E4)
+                if node.node_id in self.lazy_node_ids:
+                    # Submit random proof — will fail verification
+                    proof = CommitmentVerifier.gen_proof_tier3(
+                        torch.randn(1, 3, 224, 224),
+                        torch.randn(1, 64, 56, 56),
+                    )
+
+                train_losses[node.node_id] = avg_loss
+                self.node_losses[node.node_id] = avg_loss
+
+                # Broadcast LRH to gossip network (P0 fix: gossip was never broadcast)
+                comp_load = (cut_layer / 4.0) * (batch_size / 32.0)
+                self.gossip.broadcast(node.node_id, {
+                    "flops_ratio": node.flops_ratio,
+                    "ram_mb": node.ram_mb,
+                    "bandwidth_mbps": node.bandwidth_mbps,
+                    "reputation": node.reputation,
+                    "load": comp_load,
+                    "round": self.current_round,
+                })
+
+                # Update node progress tracking
+                progress = self.node_progress.get(node.node_id)
+                if progress:
+                    progress.current_round = self.current_round
+                    progress.total_epochs_trained += H
+                    progress.local_epochs_this_round = H
+                    progress.cut_layer = cut_layer
+                    progress.batch_size = batch_size
+                    progress.last_loss = avg_loss
+                    progress.cumulative_loss += avg_loss
+
+                return update, proof
+
+            except Exception as e:
+                # Crash-proofing: log error, mark node as excluded
+                print(f"WARNING: Node {node.node_id} training failed: {e}")
+                progress = self.node_progress.get(node.node_id)
+                if progress:
+                    progress.times_excluded += 1
+                    progress.status = "error"
+                return None
 
         with ThreadPoolExecutor(max_workers=min(self.n_nodes, 16)) as executor:
             futures = {
@@ -525,11 +611,11 @@ class ChainFSLProtocol:
             if a.dim() == 4:
                 a = a.mean(dim=[1, 2, 3])  # Global average to get compact representation
 
-        model_hash = self._hash_state(trainer.get_client_state())
+        model_state = trainer.get_client_state()
 
         tier = node.tier
         if tier <= 2:
-            proof = CommitmentVerifier.gen_proof_tier1(x, a, {"hash": model_hash})
+            proof = CommitmentVerifier.gen_proof_tier1(x, a, model_state)
         elif tier == 3:
             proof = CommitmentVerifier.gen_proof_tier3(x, a)
         else:
@@ -557,6 +643,15 @@ class ChainFSLProtocol:
 
         # Verify all
         verif_results = self.tve.verify(updates, proofs, self.lazy_node_ids)
+
+        # Update verification rates for Shapley value_fn (P0 fix)
+        for node_id, result in verif_results.items():
+            if hasattr(result, 'is_valid'):
+                rate = 1.0 if result.is_valid else 0.0
+            else:
+                rate = 1.0 if result.get("is_valid", True) else 0.0
+            # EMA update
+            self.verification_rates[node_id] = 0.9 * self.verification_rates.get(node_id, 1.0) + 0.1 * rate
 
         return verif_results
 
@@ -594,17 +689,35 @@ class ChainFSLProtocol:
             rewards = {nid: R / n for nid in node_ids}
             return shapley_vals, rewards
 
-        # Characteristic function: weighted accuracy proxy
+        # Characteristic function: multi-component v(S) per Eq. 13
+        # Components: data_size + verification_quality + resource_provision
         def value_fn(coalition: List[int]) -> float:
             if not coalition:
                 return 0.0
+
+            # Component 1: Data size (normalized)
             total_data = sum(
                 self.train_loaders[nid].dataset.__len__()
                 for nid in coalition
                 if nid in self.train_loaders
             )
-            # Normalize by dataset size
-            return total_data / 50000.0
+            data_component = total_data / 50000.0
+
+            # Component 2: Verification quality (EMA rate)
+            verif_rates = [self.verification_rates.get(nid, 1.0) for nid in coalition]
+            verif_component = float(np.mean(verif_rates)) if verif_rates else 0.0
+
+            # Component 3: Resource provision (normalized flops_ratio)
+            node_profile = {n.node_id: n for n in self.nodes}
+            resource_vals = [
+                node_profile[nid].flops_ratio
+                for nid in coalition
+                if nid in node_profile
+            ]
+            resource_component = float(np.mean(resource_vals)) if resource_vals else 0.0
+
+            # Weighted combination (0.5 data, 0.3 verif, 0.2 resource)
+            return 0.5 * data_component + 0.3 * verif_component + 0.2 * resource_component
 
         # Compute Shapley
         calculator = ShapleyCalculator(self.shapley_config)
@@ -614,10 +727,8 @@ class ChainFSLProtocol:
         # Distribute rewards
         verif_penalties = self.tve.committee.get_penalties(verif_results)
         rewards = self.tokenomics.distribute(
-            t=self.current_round,
             shapley_values=shapley_vals,
-            lazy_nodes=self.tokenomics.detect_lazy_nodes(shapley_vals),
-            poison_nodes=set(),
+            verification_results=verif_results,
         )
 
         return shapley_vals, rewards
@@ -656,23 +767,18 @@ class ChainFSLProtocol:
                 proof_type="zk_mock",
             )
 
-        # Commit block (Merkle root mock)
-        merkle_data = json.dumps(
-            {str(k): float(v) for k, v in rewards.items()}, sort_keys=True
-        ).encode()
-        merkle_root = hashlib.sha256(merkle_data).hexdigest()
         n_verified = sum(
             1 for r in verif_results.values()
             if (isinstance(r, dict) and r.get("is_valid", True))
             or (hasattr(r, "is_valid") and r.is_valid)
         )
-        self.ledger.commit_block(epoch, merkle_root, n_verified)
+        self.ledger.commit_block(epoch, rewards, n_verified)
 
     # -------------------------------------------------------------------------
     # Phase 8: HASO policy update
     # -------------------------------------------------------------------------
 
-    def _phase_haso_update(self, shapley_vals: Dict[int, float]) -> None:
+    def _phase_haso_update(self, shapley_vals: Dict[int, float], rewards: Dict[int, float]) -> None:
         """Phase 8: Update PPO policies with Shapley-based reward shaping."""
         if not self.haso_enabled or self.agent_pool is None:
             return
@@ -682,6 +788,13 @@ class ChainFSLProtocol:
         # Use configurable ppo_update_timesteps from config (default 256)
         update_ts = self.cfg.get("ppo_update_timesteps", 256)
         self.agent_pool.learn_all(total_timesteps=update_ts)
+
+        # Update per-node reward tracking
+        for node_id, reward in rewards.items():
+            progress = self.node_progress.get(node_id)
+            if progress:
+                progress.last_reward = reward
+                progress.cumulative_reward += reward
 
     # -------------------------------------------------------------------------
     # Metrics & evaluation
@@ -744,15 +857,20 @@ class ChainFSLProtocol:
             ledger_size_kb=ledger_kb,
         )
 
-    def _evaluate(self) -> float:
-        """Evaluate global model on test set."""
+    def _evaluate(self) -> Dict[str, float]:
+        """
+        Evaluate global model on test set.
+
+        Returns:
+            Dict with accuracy, loss, precision, recall, F1 (macro and weighted).
+        """
         self.model.eval()
-        correct = 0
-        total = 0
         criterion = torch.nn.CrossEntropyLoss()
         total_loss = 0.0
+        all_predictions = []
+        all_targets = []
 
-        # Get test loader (create a simple one)
+        # Get test loader
         try:
             from ..sfl.data_loader import create_test_loader
             test_loader = create_test_loader(
@@ -761,7 +879,8 @@ class ChainFSLProtocol:
                 data_dir="./data",
             )
         except Exception:
-            return 0.0
+            return {"accuracy": 0.0, "loss": 0.0, "precision_macro": 0.0,
+                    "recall_macro": 0.0, "f1_macro": 0.0, "f1_weighted": 0.0}
 
         with torch.no_grad():
             for x, y in test_loader:
@@ -770,12 +889,23 @@ class ChainFSLProtocol:
                 loss = criterion(out, y)
                 total_loss += loss.item()
                 _, predicted = out.max(1)
-                correct += predicted.eq(y).sum().item()
-                total += y.size(0)
+                all_predictions.append(predicted.cpu().numpy())
+                all_targets.append(y.cpu().numpy())
+
+        all_predictions = np.concatenate(all_predictions)
+        all_targets = np.concatenate(all_targets)
+        n_classes = self.cfg.get("n_classes", 10)
+        total = len(all_targets)
 
         if total == 0:
-            return 0.0
-        return 100.0 * correct / total
+            return {"accuracy": 0.0, "loss": 0.0, "precision_macro": 0.0,
+                    "recall_macro": 0.0, "f1_macro": 0.0, "f1_weighted": 0.0}
+
+        # Compute full metrics
+        metrics = compute_metrics(all_predictions, all_targets, n_classes)
+        metrics["loss"] = total_loss / max(len(test_loader), 1)
+        metrics["accuracy"] = 100.0 * metrics["accuracy"]  # Convert to %
+        return metrics
 
     @staticmethod
     def _jains_fairness(values: List[float]) -> float:
@@ -808,6 +938,9 @@ class ChainFSLProtocol:
             f"Latency: {m.round_latency:.2f}s | "
             f"Reward: {m.total_reward:.2f}"
         )
+        # Print per-node progress every 5 rounds
+        if t % 5 == 0:
+            self.print_node_progress()
 
     # -------------------------------------------------------------------------
     # Persistence
@@ -829,6 +962,53 @@ class ChainFSLProtocol:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
+    def get_node_progress(self, node_id: int) -> NodeProgress:
+        """
+        Get progress tracker for a specific node.
+
+        Args:
+            node_id: Node identifier.
+
+        Returns:
+            NodeProgress object for that node.
+        """
+        return self.node_progress.get(node_id)
+
+    def get_all_node_progress(self) -> Dict[int, NodeProgress]:
+        """Get progress trackers for all nodes."""
+        return dict(self.node_progress)
+
+    def print_node_progress(self, node_ids: Optional[List[int]] = None) -> None:
+        """
+        Print a formatted table of per-node progress.
+
+        Args:
+            node_ids: List of node IDs to show. If None, shows all.
+        """
+        print("\n" + "=" * 100)
+        print(f"{'NodeID':>6} | {'Round':>5} | {'Epochs':>6} | {'CutL':>4} | {'BS':>3} | {'LastLoss':>8} | {'MeanLoss':>8} | {'Excl':>4} | {'LastReward':>10} | {'Completed':>9}")
+        print("-" * 100)
+
+        ids_to_show = node_ids or [nid for nid in self.node_progress]
+        for nid in sorted(ids_to_show):
+            p = self.node_progress.get(nid)
+            if p is None:
+                continue
+            status = "YES" if p.completed else "no"
+            print(
+                f"{p.node_id:>6} | "
+                f"{p.current_round:>5} | "
+                f"{p.total_epochs_trained:>6} | "
+                f"{p.cut_layer:>4} | "
+                f"{p.batch_size:>3} | "
+                f"{p.last_loss:>8.4f} | "
+                f"{p.mean_loss:>8.4f} | "
+                f"{p.times_excluded:>4} | "
+                f"{p.last_reward:>10.4f} | "
+                f"{status:>9}"
+            )
+        print("=" * 100)
+
     def get_summary(self) -> Dict[str, Any]:
         """Compute summary statistics across all rounds."""
         if not self.metrics_history:
@@ -844,3 +1024,76 @@ class ChainFSLProtocol:
             "mean_fairness": mean_fairness,
             "total_rounds": len(self.metrics_history),
         }
+
+    # -------------------------------------------------------------------------
+    # Checkpointing (ExperimentAgent)
+    # -------------------------------------------------------------------------
+
+    def save_checkpoint(self, path: str) -> None:
+        """
+        Save full protocol state to checkpoint file.
+
+        Args:
+            path: Path to save checkpoint.
+        """
+        node_progress_dict = {
+            nid: p.to_dict() for nid, p in self.node_progress.items()
+        }
+        metrics_list = [m.to_dict() for m in self.metrics_history]
+
+        save_checkpoint(
+            path=path,
+            round_num=self.current_round,
+            model_state=self.global_state,
+            node_states={},  # trainer states not serialized
+            metrics_history=metrics_list,
+            config=self.cfg,
+            node_progress=node_progress_dict,
+        )
+
+    def load_checkpoint(self, path: str) -> None:
+        """
+        Load protocol state from checkpoint file.
+
+        Args:
+            path: Path to checkpoint file.
+        """
+        checkpoint = load_checkpoint(path)
+        self.current_round = checkpoint["round"]
+        self.global_state = checkpoint["model_state"]
+        self.model.load_state_dict(self.global_state)
+        self.metrics_history = [
+            RoundMetrics(**m) for m in checkpoint["metrics_history"]
+        ]
+        # Restore node progress
+        for nid, pdict in checkpoint.get("node_progress", {}).items():
+            if nid in self.node_progress:
+                p = self.node_progress[nid]
+                p.current_round = pdict.get("current_round", 0)
+                p.total_epochs_trained = pdict.get("total_epochs_trained", 0)
+                p.last_loss = pdict.get("last_loss", 0.0)
+                p.last_reward = pdict.get("last_reward", 0.0)
+                p.cut_layer = pdict.get("cut_layer", 0)
+                p.batch_size = pdict.get("batch_size", 0)
+
+    # -------------------------------------------------------------------------
+    # Progress tracking (ExperimentAgent)
+    # -------------------------------------------------------------------------
+
+    def get_progress_tracker(self, eval_every: int = 10, checkpoint_every: int = 10) -> ProgressTracker:
+        """
+        Create a ProgressTracker for this protocol.
+
+        Args:
+            eval_every: Evaluate every N rounds.
+            checkpoint_every: Checkpoint every N rounds.
+
+        Returns:
+            ProgressTracker instance.
+        """
+        return ProgressTracker(
+            total_rounds=self.cfg.get("global_rounds", 100),
+            n_nodes=self.n_nodes,
+            eval_every=eval_every,
+            checkpoint_every=checkpoint_every,
+        )

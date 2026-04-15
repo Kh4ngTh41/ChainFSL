@@ -28,6 +28,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import yaml
 
+from src.utils.metrics import compute_metrics, jains_fairness, gini_coefficient
+
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load YAML config file."""
