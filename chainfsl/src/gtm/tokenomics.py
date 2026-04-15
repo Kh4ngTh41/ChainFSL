@@ -182,7 +182,12 @@ class TokenomicsEngine:
         lazy_nodes = self.detect_lazy_nodes(shapley_values)
         poison_nodes = set()
         for nid, res in verification_results.items():
-            if not res.get("valid", True):
+            # Handle both dict (from TVE) and VerificationResult dataclass
+            if hasattr(res, 'is_valid'):
+                is_valid = res.is_valid
+            else:
+                is_valid = res.get("valid", True)
+            if not is_valid:
                 poison_nodes.add(nid)
 
         rewards = {}

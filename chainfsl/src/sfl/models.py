@@ -240,7 +240,8 @@ class ClientModel:
             return
 
         # Rebuild computation graph: input → ... → activation
-        x = self._saved_input.detach().requires_grad_(True)
+        # Clone saved input to avoid graph reuse issues
+        x = self._saved_input.clone().detach().requires_grad_(True)
 
         with torch.set_grad_enabled(True):
             output = self.backbone(x)
@@ -252,12 +253,13 @@ class ClientModel:
                 inputs=params,
                 grad_outputs=[grad_a.to(output.device)],
                 retain_graph=False,
+                allow_unused=False,
             )
-            # Manually set gradients on optimizer
+            # Assign gradients (replace, not accumulate)
             for p, g in zip(params, grads):
-                if p.grad is not None:
-                    p.grad.add_(g)
-                else:
+                if g is not None:
+                    if p.grad is not None:
+                        p.grad.zero_()
                     p.grad = g
 
         self.optimizer.step()
