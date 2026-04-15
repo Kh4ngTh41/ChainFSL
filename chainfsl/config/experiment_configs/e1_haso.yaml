@@ -1,0 +1,8 @@
+# E1: HASO Effectiveness
+haso_enabled: true
+tve_enabled: true
+gtm_enabled: true
+global_rounds: 100
+n_nodes: 50
+dataset: cifar10
+model: resnet18

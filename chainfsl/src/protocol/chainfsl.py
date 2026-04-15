@@ -1,0 +1,817 @@
+"""
+ChainFSL Protocol — End-to-end Algorithm 2 orchestrator.
+
+Implements the full ChainFSL protocol from the paper:
+  1. HASO: each node observes state → picks (cut_layer, batch_size, H, target_node)
+  2. TRAINING: node forward pass to cut layer, sends smashed data to server
+  3. SERVER: backward pass, returns gradient to client
+  4. UPDATE: node updates client-side weights
+  5. TVE: generate + verify proofs (tier-dependent)
+  6. AGGREGATION: staleness-decayed weighted averaging
+  7. GTM: compute Shapley values, distribute rewards
+  8. BLOCKCHAIN: commit rewards and verifications to ledger
+  9. HASO: compute reward r_t, update PPO policy
+"""
+
+import time
+import copy
+import hashlib
+import threading
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Dict, Any, List, Set
+from dataclasses import dataclass, field
+
+import torch
+import numpy as np
+
+from ..emulator.node_profile import HardwareProfile
+from ..emulator.tier_factory import create_nodes
+from ..emulator.network_emulator import NetworkEmulator, GossipProtocol
+
+from ..sfl.models import SplittableResNet18
+from ..sfl.trainer import SFLTrainer
+from ..sfl.aggregator import AsyncAggregator, FedAvgAggregator
+from ..sfl.data_loader import get_dataloaders
+
+from ..haso.env import SFLNodeEnv
+from ..haso.agent import HaSOAgentPool
+from ..haso.gossip import HASOGossip
+
+from ..tve.commitment import CommitmentVerifier, Proof
+from ..tve.committee import VerificationCommittee, TVEConfig, TieredVerificationEngine
+from ..tve.vrf import MockVRF
+
+from ..gtm.shapley import TMCSShapley, ShapleyConfig, ShapleyCalculator
+from ..gtm.tokenomics import TokenomicsEngine, TokenomicsConfig, NashValidator
+
+from ..blockchain.ledger import BlockchainLedger
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RoundMetrics:
+    """Metrics collected per round."""
+    round: int
+    round_latency: float
+    train_loss: float
+    test_acc: float
+    n_valid_updates: int
+    n_participants: int
+    attack_detection_rate: float
+    fairness_index: float
+    total_reward: float
+    mean_shapley: float
+    shapley_variance: float
+    mean_verification_ms: float
+    ledger_size_kb: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "round": self.round,
+            "round_latency": self.round_latency,
+            "train_loss": self.train_loss,
+            "test_acc": self.test_acc,
+            "n_valid_updates": self.n_valid_updates,
+            "n_participants": self.n_participants,
+            "attack_detection_rate": self.attack_detection_rate,
+            "fairness_index": self.fairness_index,
+            "total_reward": self.total_reward,
+            "mean_shapley": self.mean_shapley,
+            "shapley_variance": self.shapley_variance,
+            "mean_verification_ms": self.mean_verification_ms,
+            "ledger_size_kb": self.ledger_size_kb,
+        }
+
+
+# ---------------------------------------------------------------------------
+# ChainFSL Protocol
+# ---------------------------------------------------------------------------
+
+class ChainFSLProtocol:
+    """
+    End-to-end ChainFSL Protocol orchestrator.
+
+    Integrates all modules:
+    - HASO (DRL-based split optimization)
+    - SFL (Split Federated Learning pipeline)
+    - TVE (Tiered Verification Engine)
+    - GTM (Game-Theoretic Tokenomics)
+    - Blockchain (SQLite ledger)
+
+    Runs on a single machine using ThreadPoolExecutor for concurrency.
+    """
+
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        nodes: Optional[List[HardwareProfile]] = None,
+        device: Optional[torch.device] = None,
+        db_path: str = "./chainfsl_ledger.db",
+    ):
+        """
+        Args:
+            config: Full config dict (from YAML). Keys:
+                - n_nodes, tier_distribution, model, dataset, n_classes
+                - global_rounds, batch_size_default, dirichlet_alpha
+                - haso_enabled, ppo_learning_rate, ppo_n_steps, reward_alpha/beta/gamma
+                - tve_enabled, committee_size, vrf_omega
+                - gtm_enabled, shapley_M, reward_total_init, reward_min, halving_rounds
+                - sybil_fraction, lazy_client_fraction, poison_fraction
+            nodes: Pre-created HardwareProfile list. If None, creates from config.
+            device: Computation device. Defaults to CUDA if available.
+            db_path: Path for blockchain ledger SQLite DB.
+        """
+        self.cfg = config
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # --- Nodes ---
+        tier_dist_list = config.get("tier_distribution", [0.1, 0.3, 0.4, 0.2])
+        from ..emulator.tier_factory import TierDistribution
+        tier_dist = TierDistribution(
+            tiers=[1, 2, 3, 4],
+            probabilities=tier_dist_list,
+        )
+        self.nodes = nodes or create_nodes(config["n_nodes"], distribution=tier_dist)
+        self.n_nodes = len(self.nodes)
+
+        # --- Global model ---
+        self.model = SplittableResNet18(
+            n_classes=config.get("n_classes", 10),
+            cut_layer=2,
+        ).to(self.device)
+
+        # --- Data loaders ---
+        self.train_loaders = get_dataloaders(
+            dataset_name=config.get("dataset", "cifar10"),
+            n_clients=self.n_nodes,
+            alpha=config.get("dirichlet_alpha", 0.5),
+            batch_size=config.get("batch_size_default", 32),
+            data_dir="./data",
+            download=True,
+            seed=config.get("seed", 42),
+        )
+
+        # --- Network & Gossip ---
+        self.net = NetworkEmulator(variance=0.3)
+        self.gossip = GossipProtocol(fanout=3)
+
+        # --- HASO ---
+        self.haso_enabled = config.get("haso_enabled", True)
+        haso_envs = [
+            SFLNodeEnv(
+                node_profile=n,
+                n_compute_nodes=max(1, self.n_nodes - 1),
+                reward_weights=(
+                    config.get("reward_alpha", 1.0),
+                    config.get("reward_beta", 0.5),
+                    config.get("reward_gamma", 0.1),
+                ),
+                max_steps=config.get("global_rounds", 100),
+                seed=n.node_id,
+            )
+            for n in self.nodes
+        ]
+        self.agent_pool: Optional[HaSOAgentPool] = None
+        if self.haso_enabled:
+            self.agent_pool = HaSOAgentPool(
+                envs=haso_envs,
+                learning_rate=config.get("ppo_learning_rate", 3e-4),
+                n_steps=config.get("ppo_n_steps", 512),
+                batch_size=config.get("ppo_batch_size", 64),
+                n_epochs=10,
+                verbose=0,
+            )
+
+        # --- TVE ---
+        self.tve_enabled = config.get("tve_enabled", True)
+        tve_config = TVEConfig(
+            committee_size=config.get("committee_size", 5),
+            omega=config.get("vrf_omega", 0.3),
+        )
+        self.tve = TieredVerificationEngine(nodes=self.nodes, config=tve_config)
+
+        # --- GTM ---
+        self.gtm_enabled = config.get("gtm_enabled", True)
+        tokenomics_config = TokenomicsConfig(
+            initial_base_reward=config.get("reward_total_init", 1000.0),
+            min_base_reward=config.get("reward_min", 10.0),
+            halving_rounds=config.get("halving_rounds", 50),
+            decay_rate=1.0 - (1.0 / config.get("halving_rounds", 50)),
+        )
+        self.tokenomics = TokenomicsEngine(tokenomics_config)
+        self.shapley_config = ShapleyConfig(
+            M=config.get("shapley_M", 50),
+            seed=config.get("seed", 42),
+        )
+
+        # --- Blockchain ---
+        self.ledger = BlockchainLedger(db_path=db_path)
+
+        # --- Aggregator ---
+        self.global_state: Dict[str, torch.Tensor] = {
+            k: v.clone() for k, v in self.model.state_dict().items()
+        }
+        self.aggregator = AsyncAggregator(
+            global_state=self.global_state,
+            rho=config.get("staleness_decay", 0.9),
+        )
+
+        # --- Trainers (created per round per node) ---
+        self.trainers: Dict[int, SFLTrainer] = {}
+
+        # --- State ---
+        self.current_round = 0
+        self.node_staleness: Dict[int, int] = {n.node_id: 0 for n in self.nodes}
+        self.node_losses: Dict[int, float] = {n.node_id: 0.0 for n in self.nodes}
+
+        # --- Attack injection (E4) ---
+        n_lazy = int(config.get("lazy_client_fraction", 0.0) * self.n_nodes)
+        self.lazy_node_ids: Set[int] = set(n.node_id for n in list(self.nodes)[:n_lazy])
+        self.sybil_node_ids: Set[int] = set()
+
+        # --- Tracking ---
+        self.metrics_history: List[RoundMetrics] = []
+
+        # --- Sync lock ---
+        self._lock = threading.Lock()
+
+        # --- Proof cache (for verification) ---
+        self._proof_cache: Dict[int, Proof] = {}
+
+    # -------------------------------------------------------------------------
+    # Public API
+    # -------------------------------------------------------------------------
+
+    def run(self, total_rounds: int, eval_every: int = 10) -> List[RoundMetrics]:
+        """
+        Run the full ChainFSL protocol for total_rounds.
+
+        Args:
+            total_rounds: Number of global rounds.
+            eval_every: Evaluate on test set every N rounds.
+
+        Returns:
+            List of RoundMetrics, one per round.
+        """
+        for t in range(1, total_rounds + 1):
+            self.current_round = t
+            round_start = time.perf_counter()
+
+            # Phase 1: HASO decisions
+            configs = self._phase_haso()
+
+            # Phase 2-3: SFL training + TVE proof generation
+            updates, proofs, train_losses = self._phase_training(configs)
+
+            # Phase 4: TVE verification
+            verif_results = self._phase_verification(updates, proofs)
+
+            # Phase 5: Aggregation
+            valid_ids = self.tve.committee.get_valid_node_ids(verif_results)
+            valid_updates = [u for u in updates if u["node_id"] in valid_ids]
+            self._phase_aggregation(valid_updates)
+
+            # Phase 6: GTM rewards
+            shapley_vals, rewards = self._phase_gtm(updates, verif_results)
+
+            # Phase 7: Blockchain commit
+            self._phase_blockchain(verif_results, rewards, shapley_vals)
+
+            # Phase 8: HASO policy update
+            self._phase_haso_update(shapley_vals)
+
+            # Metrics
+            elapsed = time.perf_counter() - round_start
+            metrics = self._collect_metrics(
+                t, elapsed, train_losses, verif_results, rewards, shapley_vals
+            )
+            self.metrics_history.append(metrics)
+
+            if t % eval_every == 0 or t == total_rounds:
+                test_acc = self._evaluate()
+                metrics.test_acc = test_acc
+                self._log_round(t, metrics)
+
+        return self.metrics_history
+
+    def inject_lazy_clients(self, node_ids: Set[int]) -> None:
+        """Inject lazy client behavior (E4 security experiment)."""
+        self.lazy_node_ids = node_ids
+
+    def inject_sybil(self, node_ids: Set[int]) -> None:
+        """Inject Sybil nodes (E4 security experiment)."""
+        self.sybil_node_ids = node_ids
+
+    # -------------------------------------------------------------------------
+    # Phase 1: HASO decisions
+    # -------------------------------------------------------------------------
+
+    def _phase_haso(self) -> Dict[int, Dict[str, Any]]:
+        """
+        Phase 1: Each node observes state and decides (cut_layer, batch_size, H, target_node).
+
+        Returns:
+            Dict[node_id] -> config dict.
+        """
+        configs = {}
+
+        if not self.haso_enabled or self.agent_pool is None:
+            # Ablation: fixed uniform cut layer 2
+            for node in self.nodes:
+                configs[node.node_id] = {
+                    "cut_layer": 2,
+                    "batch_size": self.cfg.get("batch_size_default", 32),
+                    "H": 1,
+                    "target_compute_node": 0,
+                }
+            return configs
+
+        # Collect observations from all envs
+        obs_list = []
+        for n in self.nodes:
+            agent = self.agent_pool.agents[n.node_id]
+            obs = agent.env._get_obs()
+            # Update neighbor availability from gossip
+            neighbor_avail = self.gossip.mean_neighbor_availability(n.node_id)
+            agent.env._neighbor_avail = neighbor_avail
+            obs_list.append(obs)
+
+        # Batch decision
+        decisions = self.agent_pool.decide_all(obs_list, deterministic=False)
+
+        for n, decision in zip(self.nodes, decisions):
+            node_id = n.node_id
+            cut_layer = decision["cut_layer"]
+
+            # Enforce tier memory constraint
+            memory_map = SplittableResNet18.MEMORY_ESTIMATES_MB
+            if not n.can_fit_cut_layer(cut_layer, memory_map):
+                # Fall back to deepest cut that fits
+                for cl in sorted(memory_map.keys(), reverse=True):
+                    if n.can_fit_cut_layer(cl, memory_map):
+                        cut_layer = cl
+                        break
+                else:
+                    cut_layer = 1
+
+            configs[node_id] = {
+                "cut_layer": cut_layer,
+                "batch_size": decision["batch_size"],
+                "H": decision["H"],
+                "target_compute_node": decision["target_compute_node"],
+            }
+
+        return configs
+
+    # -------------------------------------------------------------------------
+    # Phase 2-3: SFL Training + TVE proof generation
+    # -------------------------------------------------------------------------
+
+    def _phase_training(
+        self, configs: Dict[int, Dict[str, Any]]
+    ) -> tuple:
+        """
+        Phase 2: Run SFL training for all nodes (concurrent).
+        Phase 3: Generate TVE proofs (tier-dependent).
+
+        Returns:
+            (updates, proofs, train_losses) tuples.
+        """
+        updates = []
+        proofs = []
+        train_losses: Dict[int, float] = {}
+
+        def train_node(node: HardwareProfile) -> Optional[tuple]:
+            cfg = configs.get(node.node_id, {})
+            if cfg is None:
+                return None
+
+            cut_layer = cfg.get("cut_layer", 2)
+            batch_size = cfg.get("batch_size", 32)
+            H = cfg.get("H", 1)
+
+            # Memory enforcement
+            if not node.can_fit_cut_layer(cut_layer, SplittableResNet18.MEMORY_ESTIMATES_MB):
+                cut_layer = 1
+
+            # Create trainer for this node
+            trainer = SFLTrainer(
+                node_id=node.node_id,
+                model=self.model,
+                cut_layer=cut_layer,
+                device=self.device,
+            )
+            self.trainers[node.node_id] = trainer
+
+            # Sync from global state
+            trainer.sync_from_global(self.global_state, cut_layer)
+
+            # Run H local epochs
+            loader = self.train_loaders[node.node_id]
+            avg_loss, _ = trainer.local_epochs(loader, H=H, verbose=False)
+
+            # Client/server state for aggregation
+            client_state = trainer.get_client_state()
+            server_state = trainer.get_server_state()
+
+            # Compute smashed data size for comm time estimation
+            smashed_bytes = SplittableResNet18.smashed_data_size(cut_layer, batch_size)
+
+            # Build update dict
+            update = {
+                "node_id": node.node_id,
+                "cut_layer": cut_layer,
+                "batch_size": batch_size,
+                "client_state": client_state,
+                "server_state": server_state,
+                "data_size": len(loader.dataset),
+                "staleness": self.node_staleness.get(node.node_id, 0),
+                "input_hash": self._hash_state(client_state),
+                "smashed_bytes": smashed_bytes,
+                "loss": avg_loss,
+                "gradient_norm": 0.0,  # populated below
+            }
+
+            # Generate TVE proof based on tier
+            proof = self._generate_proof(node, trainer, cut_layer)
+            self._proof_cache[node.node_id] = proof
+
+            # Lazy client attack injection (E4)
+            if node.node_id in self.lazy_node_ids:
+                # Submit random proof — will fail verification
+                proof = CommitmentVerifier.gen_proof_tier3(
+                    torch.randn(1, 3, 224, 224),
+                    torch.randn(1, 64, 56, 56),
+                )
+
+            train_losses[node.node_id] = avg_loss
+            self.node_losses[node.node_id] = avg_loss
+
+            return update, proof
+
+        with ThreadPoolExecutor(max_workers=min(self.n_nodes, 16)) as executor:
+            futures = {
+                executor.submit(train_node, node): node
+                for node in self.nodes
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    update, proof = result
+                    updates.append(update)
+                    proofs.append(proof)
+
+        # Update staleness
+        updated_ids = {u["node_id"] for u in updates}
+        for n in self.nodes:
+            if n.node_id in updated_ids:
+                self.node_staleness[n.node_id] = 0
+            else:
+                self.node_staleness[n.node_id] = (
+                    self.node_staleness.get(n.node_id, 0) + 1
+                )
+
+        return updates, proofs, train_losses
+
+    def _generate_proof(
+        self,
+        node: HardwareProfile,
+        trainer: SFLTrainer,
+        cut_layer: int,
+    ) -> Proof:
+        """Generate tier-appropriate TVE proof."""
+        # Get a sample batch for proof generation
+        try:
+            loader = self.train_loaders[node.node_id]
+            x, _ = next(iter(loader))
+            x = x.to(self.device)
+        except Exception:
+            x = torch.randn(4, 3, 224, 224).to(self.device)
+
+        # Client forward to get activation
+        trainer.client.backbone.eval()
+        with torch.no_grad():
+            a = trainer.client.backbone(x)
+            if a.dim() == 4:
+                a = a.mean(dim=[1, 2, 3])  # Global average to get compact representation
+
+        model_hash = self._hash_state(trainer.get_client_state())
+
+        tier = node.tier
+        if tier <= 2:
+            proof = CommitmentVerifier.gen_proof_tier1(x, a, {"hash": model_hash})
+        elif tier == 3:
+            proof = CommitmentVerifier.gen_proof_tier3(x, a)
+        else:
+            proof = CommitmentVerifier.gen_proof_tier4(x)
+
+        return proof
+
+    # -------------------------------------------------------------------------
+    # Phase 4: TVE verification
+    # -------------------------------------------------------------------------
+
+    def _phase_verification(
+        self,
+        updates: List[Dict],
+        proofs: List[Proof],
+    ) -> Dict[int, Any]:
+        """Phase 4: Verify all node proofs via TVE."""
+        if not self.tve_enabled:
+            return {u["node_id"]: {"is_valid": True, "penalty": 0.0} for u in updates}
+
+        block_hash = hashlib.sha256(f"block_{self.current_round}".encode()).digest()
+
+        # Select committee
+        selected_ids = self.tve.select(self.current_round, block_hash)
+
+        # Verify all
+        verif_results = self.tve.verify(updates, proofs, self.lazy_node_ids)
+
+        return verif_results
+
+    # -------------------------------------------------------------------------
+    # Phase 5: Aggregation
+    # -------------------------------------------------------------------------
+
+    def _phase_aggregation(self, valid_updates: List[Dict]) -> None:
+        """Phase 5: Staleness-decayed async aggregation."""
+        if not valid_updates:
+            return
+
+        self.global_state = self.aggregator.aggregate(valid_updates)
+
+        # Sync server-side model with new global state
+        self.model.load_state_dict(self.global_state)
+
+    # -------------------------------------------------------------------------
+    # Phase 6: GTM rewards
+    # -------------------------------------------------------------------------
+
+    def _phase_gtm(
+        self,
+        updates: List[Dict],
+        verif_results: Dict[int, Any],
+    ) -> tuple:
+        """Phase 6: Compute Shapley values and distribute rewards."""
+        node_ids = [u["node_id"] for u in updates]
+
+        if not self.gtm_enabled:
+            # Equal distribution fallback
+            n = len(node_ids)
+            R = self.tokenomics.total_reward(self.current_round)
+            shapley_vals = {nid: 1.0 / n for nid in node_ids}
+            rewards = {nid: R / n for nid in node_ids}
+            return shapley_vals, rewards
+
+        # Characteristic function: weighted accuracy proxy
+        def value_fn(coalition: List[int]) -> float:
+            if not coalition:
+                return 0.0
+            total_data = sum(
+                self.train_loaders[nid].dataset.__len__()
+                for nid in coalition
+                if nid in self.train_loaders
+            )
+            # Normalize by dataset size
+            return total_data / 50000.0
+
+        # Compute Shapley
+        calculator = ShapleyCalculator(self.shapley_config)
+        shapley_result = calculator.compute_shapley(node_ids, value_fn)
+        shapley_vals = shapley_result.values
+
+        # Distribute rewards
+        verif_penalties = self.tve.committee.get_penalties(verif_results)
+        rewards = self.tokenomics.distribute(
+            t=self.current_round,
+            shapley_values=shapley_vals,
+            lazy_nodes=self.tokenomics.detect_lazy_nodes(shapley_vals),
+            poison_nodes=set(),
+        )
+
+        return shapley_vals, rewards
+
+    # -------------------------------------------------------------------------
+    # Phase 7: Blockchain commit
+    # -------------------------------------------------------------------------
+
+    def _phase_blockchain(
+        self,
+        verif_results: Dict[int, Any],
+        rewards: Dict[int, float],
+        shapley_vals: Dict[int, float],
+    ) -> None:
+        """Phase 7: Record rewards and verifications to blockchain ledger."""
+        epoch = self.current_round
+
+        # Record rewards
+        for node_id, reward in rewards.items():
+            phi = shapley_vals.get(node_id, 0.0)
+            self.ledger.record_reward(epoch, node_id, reward, phi)
+
+        # Record verifications
+        for node_id, result in verif_results.items():
+            if isinstance(result, dict):
+                is_valid = result.get("is_valid", True)
+                penalty = result.get("penalty", 0.0)
+            else:
+                is_valid = result.is_valid
+                penalty = result.penalty
+            self.ledger.record_verification(
+                epoch=epoch,
+                node_id=node_id,
+                is_valid=is_valid,
+                penalty=penalty,
+                proof_type="zk_mock",
+            )
+
+        # Commit block (Merkle root mock)
+        merkle_data = json.dumps(
+            {str(k): float(v) for k, v in rewards.items()}, sort_keys=True
+        ).encode()
+        merkle_root = hashlib.sha256(merkle_data).hexdigest()
+        n_verified = sum(
+            1 for r in verif_results.values()
+            if (isinstance(r, dict) and r.get("is_valid", True))
+            or (hasattr(r, "is_valid") and r.is_valid)
+        )
+        self.ledger.commit_block(epoch, merkle_root, n_verified)
+
+    # -------------------------------------------------------------------------
+    # Phase 8: HASO policy update
+    # -------------------------------------------------------------------------
+
+    def _phase_haso_update(self, shapley_vals: Dict[int, float]) -> None:
+        """Phase 8: Update PPO policies with Shapley-based reward shaping."""
+        if not self.haso_enabled or self.agent_pool is None:
+            return
+
+        self.agent_pool.update_shapley_all(shapley_vals)
+        self.agent_pool.learn_all(total_timesteps=64)
+
+    # -------------------------------------------------------------------------
+    # Metrics & evaluation
+    # -------------------------------------------------------------------------
+
+    def _collect_metrics(
+        self,
+        t: int,
+        latency: float,
+        train_losses: Dict[int, float],
+        verif_results: Dict[int, Any],
+        rewards: Dict[int, float],
+        shapley_vals: Dict[int, float],
+    ) -> RoundMetrics:
+        """Collect per-round metrics."""
+        n_participants = len(train_losses)
+        avg_loss = float(np.mean(list(train_losses.values()))) if train_losses else 0.0
+
+        # Validation results
+        n_valid = sum(
+            1 for r in verif_results.values()
+            if (isinstance(r, dict) and r.get("is_valid", True))
+            or (hasattr(r, "is_valid") and r.is_valid)
+        )
+        detection_rate = n_valid / max(len(verif_results), 1)
+
+        # Fairness (Jain's index)
+        reward_values = [max(0.0, r) for r in rewards.values()]
+        fairness = self._jains_fairness(reward_values)
+
+        # Shapley stats
+        shapley_list = list(shapley_vals.values())
+        mean_shapley = float(np.mean(shapley_list)) if shapley_list else 0.0
+        var_shapley = float(np.var(shapley_list)) if shapley_list else 0.0
+
+        # Verification time
+        verif_times = [
+            r.verification_time_ms
+            for r in verif_results.values()
+            if hasattr(r, "verification_time_ms")
+        ]
+        mean_verif_ms = float(np.mean(verif_times)) if verif_times else 0.0
+
+        # Ledger size
+        ledger_kb = self.ledger.ledger_size_bytes() / 1024.0
+
+        return RoundMetrics(
+            round=t,
+            round_latency=latency,
+            train_loss=avg_loss,
+            test_acc=0.0,  # filled after evaluation
+            n_valid_updates=n_valid,
+            n_participants=n_participants,
+            attack_detection_rate=detection_rate,
+            fairness_index=fairness,
+            total_reward=sum(max(0.0, r) for r in rewards.values()),
+            mean_shapley=mean_shapley,
+            shapley_variance=var_shapley,
+            mean_verification_ms=mean_verif_ms,
+            ledger_size_kb=ledger_kb,
+        )
+
+    def _evaluate(self) -> float:
+        """Evaluate global model on test set."""
+        self.model.eval()
+        correct = 0
+        total = 0
+        criterion = torch.nn.CrossEntropyLoss()
+        total_loss = 0.0
+
+        # Get test loader (create a simple one)
+        try:
+            from ..sfl.data_loader import create_test_loader
+            test_loader = create_test_loader(
+                dataset_name=self.cfg.get("dataset", "cifar10"),
+                batch_size=64,
+                data_dir="./data",
+            )
+        except Exception:
+            return 0.0
+
+        with torch.no_grad():
+            for x, y in test_loader:
+                x, y = x.to(self.device), y.to(self.device)
+                out = self.model(x)
+                loss = criterion(out, y)
+                total_loss += loss.item()
+                _, predicted = out.max(1)
+                correct += predicted.eq(y).sum().item()
+                total += y.size(0)
+
+        if total == 0:
+            return 0.0
+        return 100.0 * correct / total
+
+    @staticmethod
+    def _jains_fairness(values: List[float]) -> float:
+        """Jain's fairness index: (sum x_i)^2 / (n * sum x_i^2)."""
+        if not values or sum(values) == 0:
+            return 0.0
+        n = len(values)
+        return (sum(values) ** 2) / (n * sum(x ** 2 for x in values))
+
+    @staticmethod
+    def _hash_state(state: Dict[str, torch.Tensor]) -> bytes:
+        """Hash a model state dict for commitment."""
+        data = b""
+        for key in sorted(state.keys()):
+            data += state[key].numpy().tobytes()
+        return hashlib.sha256(data).digest()
+
+    # -------------------------------------------------------------------------
+    # Logging
+    # -------------------------------------------------------------------------
+
+    def _log_round(self, t: int, m: RoundMetrics) -> None:
+        """Log round metrics to stdout."""
+        print(
+            f"Round {t:3d}/{self.cfg.get('global_rounds', 100)} | "
+            f"Loss: {m.train_loss:.4f} | "
+            f"Acc: {m.test_acc:.2f}% | "
+            f"Fairness: {m.fairness_index:.3f} | "
+            f"Valid: {m.n_valid_updates}/{m.n_participants} | "
+            f"Latency: {m.round_latency:.2f}s | "
+            f"Reward: {m.total_reward:.2f}"
+        )
+
+    # -------------------------------------------------------------------------
+    # Persistence
+    # -------------------------------------------------------------------------
+
+    def save_agents(self, directory: str) -> None:
+        """Save all PPO agents to disk."""
+        if self.agent_pool:
+            self.agent_pool.save_all(directory)
+
+    def load_agents(self, directory: str) -> None:
+        """Load all PPO agents from disk."""
+        if self.agent_pool:
+            self.agent_pool.load_all(directory)
+
+    def save_metrics(self, path: str) -> None:
+        """Save metrics history to JSON."""
+        data = [m.to_dict() for m in self.metrics_history]
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Compute summary statistics across all rounds."""
+        if not self.metrics_history:
+            return {}
+        final = self.metrics_history[-1]
+        best_acc = max(m.test_acc for m in self.metrics_history)
+        mean_latency = np.mean([m.round_latency for m in self.metrics_history])
+        mean_fairness = np.mean([m.fairness_index for m in self.metrics_history])
+        return {
+            "final_accuracy": final.test_acc,
+            "best_accuracy": best_acc,
+            "mean_latency": mean_latency,
+            "mean_fairness": mean_fairness,
+            "total_rounds": len(self.metrics_history),
+        }

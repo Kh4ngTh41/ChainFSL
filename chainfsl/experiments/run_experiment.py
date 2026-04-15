@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+ChainFSL Experiment Runner.
+
+Usage:
+    python experiments/run_experiment.py --exp e1
+    python experiments/run_experiment.py --exp e1 --n_nodes 20 --global_rounds 50
+    python experiments/run_experiment.py --exp e4 --lazy_fraction 0.2
+    python experiments/run_experiment.py --exp e6 --ablation full
+    python experiments/run_experiment.py --exp all --global_rounds 20
+
+Examples:
+    # E1: HASO effectiveness (ChainFSL vs baselines)
+    python experiments/run_experiment.py --exp e1
+
+    # E2: Scalability (vary number of nodes)
+    python experiments/run_experiment.py --exp e2
+
+    # E3: Non-IID data (vary Dirichlet alpha)
+    python experiments/run_experiment.py --exp e3 --alpha 0.1
+
+    # E4: Security (lazy client attack)
+    python experiments/run_experiment.py --exp e4 --lazy_fraction 0.2
+
+    # E5: Incentive (Nash equilibrium validation)
+    python experiments/run_experiment.py --exp e5
+
+    # E6: Ablation study (remove each module)
+    python experiments/run_experiment.py --exp e6
+
+    # E7: Blockchain overhead
+    python experiments/run_experiment.py --exp e7
+
+    # Run all experiments
+    python experiments/run_experiment.py --exp all
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+# Add project root to path
+_PROJECT_ROOT = Path(__file__).parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from experiments import (
+    e1_haso_effectiveness,
+    e2_scalability,
+    e3_noniid,
+    e4_security,
+    e5_incentive,
+    e6_ablation,
+    e7_blockchain_overhead,
+)
+from experiments.utils import build_config, load_config, ensure_dir
+
+
+EXPERIMENT_MAP = {
+    "e1": e1_haso_effectiveness,
+    "e2": e2_scalability,
+    "e3": e3_noniid,
+    "e4": e4_security,
+    "e5": e5_incentive,
+    "e6": e6_ablation,
+    "e7": e7_blockchain_overhead,
+}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="ChainFSL Experiment Runner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python experiments/run_experiment.py --exp e1
+  python experiments/run_experiment.py --exp e4 --lazy_fraction 0.2
+  python experiments/run_experiment.py --exp e6 --ablation no_tve
+  python experiments/run_experiment.py --exp all --global_rounds 20
+        """,
+    )
+    parser.add_argument(
+        "--exp",
+        required=True,
+        choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "all"],
+        help="Experiment to run",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to YAML config file (overrides defaults)",
+    )
+    parser.add_argument(
+        "--n_nodes",
+        type=int,
+        default=None,
+        help="Number of nodes (overrides config)",
+    )
+    parser.add_argument(
+        "--global_rounds",
+        type=int,
+        default=None,
+        help="Number of global rounds (overrides config)",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=None,
+        help="Dirichlet alpha for non-IID data (overrides config)",
+    )
+    parser.add_argument(
+        "--lazy_fraction",
+        type=float,
+        default=None,
+        help="Fraction of lazy/malicious clients (E4)",
+    )
+    parser.add_argument(
+        "--ablation",
+        type=str,
+        default=None,
+        help="Ablation variant (e.g., 'no_haso', 'no_tve', 'no_gtm') for E6",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed",
+    )
+    parser.add_argument(
+        "--log_dir",
+        default="./logs",
+        help="Directory for logs and CSV outputs",
+    )
+    parser.add_argument(
+        "--skip_baselines",
+        action="store_true",
+        help="Skip baseline comparisons (E1 only)",
+    )
+    return parser.parse_args()
+
+
+def run_exp(exp_name: str, args) -> None:
+    """Run a single experiment."""
+    print(f"\n{'#' * 60}")
+    print(f"# Running Experiment: {exp_name.upper()}")
+    print(f"{'#' * 60}")
+
+    # Build base config
+    config = build_config(
+        n_nodes=args.n_nodes or 10,
+        global_rounds=args.global_rounds or 30,
+        seed=args.seed,
+    )
+
+    # Override from YAML if provided
+    if args.config:
+        yaml_config = load_config(args.config)
+        config.update(yaml_config)
+
+    # Apply CLI overrides
+    if args.n_nodes is not None:
+        config["n_nodes"] = args.n_nodes
+    if args.global_rounds is not None:
+        config["global_rounds"] = args.global_rounds
+    if args.alpha is not None:
+        config["dirichlet_alpha"] = args.alpha
+    if args.lazy_fraction is not None:
+        config["lazy_client_fraction"] = args.lazy_fraction
+    config["seed"] = args.seed
+    config["log_dir"] = args.log_dir
+
+    # Ensure log dir
+    ensure_dir(args.log_dir)
+
+    # Dispatch
+    module = EXPERIMENT_MAP[exp_name]
+
+    if exp_name == "e1":
+        module.run(
+            config,
+            skip_baselines=getattr(args, "skip_baselines", False),
+        )
+    elif exp_name == "e6":
+        module.run(
+            config,
+            ablation_type=args.ablation,
+        )
+    else:
+        module.run(config)
+
+    print(f"[{exp_name}] Done!")
+
+
+def main():
+    args = parse_args()
+
+    if args.exp == "all":
+        # Run all experiments sequentially
+        for exp_name in ["e1", "e2", "e3", "e4", "e5", "e6", "e7"]:
+            run_exp(exp_name, args)
+            print()  # blank line between experiments
+    else:
+        run_exp(args.exp, args)
+
+
+if __name__ == "__main__":
+    main()

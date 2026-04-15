@@ -1,0 +1,7 @@
+# E6: Ablation Study
+haso_enabled: true
+tve_enabled: true
+gtm_enabled: true
+global_rounds: 50
+dataset: cifar10
+model: resnet18

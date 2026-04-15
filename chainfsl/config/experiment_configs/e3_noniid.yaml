@@ -1,0 +1,8 @@
+# E3: Non-IID
+haso_enabled: true
+tve_enabled: true
+gtm_enabled: true
+global_rounds: 100
+dataset: cifar10
+model: resnet18
+dirichlet_alpha: 0.1  # Highly non-IID

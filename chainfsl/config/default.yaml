@@ -1,0 +1,47 @@
+# Network
+n_nodes: 50
+tier_distribution: [0.1, 0.3, 0.4, 0.2]  # T1, T2, T3, T4
+
+# SFL
+model: resnet18       # resnet18 | vgg11 | mobilenetv2
+dataset: cifar10      # cifar10 | cifar100 | femnist | medmnist
+n_classes: 10
+global_rounds: 100
+local_rounds_max: 5   # H_max
+batch_size_default: 32
+dirichlet_alpha: 0.5  # Non-IID degree
+
+# HASO
+haso_enabled: true
+ppo_learning_rate: 3e-4
+ppo_n_steps: 512
+ppo_batch_size: 64
+ppo_n_epochs: 10
+ema_beta: 0.9          # EMA smoothing beta
+reward_alpha: 1.0      # local efficiency weight (comp time)
+reward_beta: 0.5       # local efficiency weight (comm time)
+reward_gamma: 0.1      # global alignment weight
+
+# TVE
+tve_enabled: true
+committee_size: 5      # K
+vrf_omega: 0.3         # reputation weighting
+stake_min: 10.0        # S_min tokens
+
+# GTM
+gtm_enabled: true
+shapley_M: 50          # MC permutations
+reward_total_init: 1000.0   # R_0
+reward_min: 10.0            # R_min
+halving_rounds: 50          # T_halving
+staleness_decay: 0.9        # rho
+
+# Security attacks (for E4)
+sybil_fraction: 0.0
+lazy_client_fraction: 0.0
+poison_fraction: 0.0
+
+# Logging
+log_dir: ./logs
+use_wandb: false
+experiment_name: chainfsl_default
