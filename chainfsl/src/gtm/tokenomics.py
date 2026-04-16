@@ -191,7 +191,16 @@ class TokenomicsEngine:
                 poison_nodes.add(nid)
 
         rewards = {}
+        # Free-riding prevention: nodes with φ < 0.01 * max(φ) receive zero
+        max_phi = max(shapley_values.values()) if shapley_values else 1.0
+        min_shapley = 0.01 * max_phi
+
         for node_id, phi in shapley_values.items():
+            # Skip nodes with negligible Shapley (free-riding prevention)
+            if phi < min_shapley:
+                rewards[node_id] = 0.0
+                continue
+
             # Base reward proportional to Shapley
             reward = R_total * max(0.0, phi) / total_phi
 

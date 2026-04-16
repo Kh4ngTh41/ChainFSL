@@ -292,6 +292,9 @@ class ChainFSLProtocol:
         # --- Proof cache (for verification) ---
         self._proof_cache: Dict[int, Proof] = {}
 
+        # --- Gradient cache (for Tier 1 cosine similarity verification) ---
+        self._grad_cache: Dict[int, Dict[str, torch.Tensor]] = {}
+
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
@@ -342,7 +345,8 @@ class ChainFSLProtocol:
             self.metrics_history.append(metrics)
 
             if t % eval_every == 0 or t == total_rounds:
-                test_acc = self._evaluate()
+                eval_result = self._evaluate()
+                test_acc = eval_result.get("accuracy", 0.0) if isinstance(eval_result, dict) else eval_result
                 metrics.test_acc = test_acc
                 self._log_round(t, metrics)
 
@@ -502,6 +506,11 @@ class ChainFSLProtocol:
                 # Compute smashed data size for comm time estimation
                 smashed_bytes = SplittableResNet18.smashed_data_size(cut_layer, batch_size)
 
+                # Get gradient norm and tensor for TVE (P1-3 fix)
+                grad_norm = trainer.get_last_grad_norm()
+                grad_tensor = trainer.get_last_grad()
+                smash_data = trainer.get_last_smash_data()
+
                 # Build update dict
                 update = {
                     "node_id": node.node_id,
@@ -514,8 +523,15 @@ class ChainFSLProtocol:
                     "input_hash": self._hash_state(client_state),
                     "smashed_bytes": smashed_bytes,
                     "loss": avg_loss,
-                    "gradient_norm": 0.0,  # populated below
+                    "gradient_norm": grad_norm,
                 }
+
+                # Store gradient and smash data for Tier 1 cosine similarity verification
+                if grad_tensor is not None and smash_data is not None:
+                    self._grad_cache[node.node_id] = {
+                        "grad": grad_tensor.detach().clone(),
+                        "smash_data": smash_data.detach().clone(),
+                    }
 
                 # Generate TVE proof based on tier
                 proof = self._generate_proof(node, trainer, cut_layer)
@@ -562,7 +578,6 @@ class ChainFSLProtocol:
                 progress = self.node_progress.get(node.node_id)
                 if progress:
                     progress.times_excluded += 1
-                    progress.status = "error"
                 return None
 
         with ThreadPoolExecutor(max_workers=min(self.n_nodes, 16)) as executor:
@@ -641,8 +656,14 @@ class ChainFSLProtocol:
         # Select committee
         selected_ids = self.tve.select(self.current_round, block_hash)
 
-        # Verify all
-        verif_results = self.tve.verify(updates, proofs, self.lazy_node_ids)
+        # Verify all (pass grad_cache for Tier 1 cosine similarity verification)
+        verif_results = self.tve.verify(updates, proofs, self.lazy_node_ids, self._grad_cache)
+
+        # Update historical gradient norms for Tier 2 verification (P1-4 fix)
+        for update in updates:
+            node_id = update["node_id"]
+            gradient_norm = update.get("gradient_norm", 1.0)
+            self.tve.update_historical_stats(node_id, gradient_norm)
 
         # Update verification rates for Shapley value_fn (P0 fix)
         for node_id, result in verif_results.items():
@@ -920,7 +941,7 @@ class ChainFSLProtocol:
         """Hash a model state dict for commitment."""
         data = b""
         for key in sorted(state.keys()):
-            data += state[key].numpy().tobytes()
+            data += state[key].cpu().numpy().tobytes()
         return hashlib.sha256(data).digest()
 
     # -------------------------------------------------------------------------
@@ -929,8 +950,9 @@ class ChainFSLProtocol:
 
     def _log_round(self, t: int, m: RoundMetrics) -> None:
         """Log round metrics to stdout."""
+        total_rounds = self.cfg.get('global_rounds', 100)
         print(
-            f"Round {t:3d}/{self.cfg.get('global_rounds', 100)} | "
+            f"Round {t:3d}/{total_rounds} | "
             f"Loss: {m.train_loss:.4f} | "
             f"Acc: {m.test_acc:.2f}% | "
             f"Fairness: {m.fairness_index:.3f} | "

@@ -57,14 +57,21 @@ class SFLTrainer:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Build client and server sub-models
-        client_backbone, server_backbone = model.split_models(cut_layer)
-        client_backbone = client_backbone.to(self.device)
-        server_backbone = server_backbone.to(self.device)
+        # Use deepcopy because split_models returns nn.Sequential sharing the SAME
+        # layer objects from the original model. Without deepcopy, client and server
+        # backbones share conv1/bn1/layerX objects, causing autograd version conflicts
+        # when server forward_backward and client backward both access the same params.
+        import copy
+        client_backbone = copy.deepcopy(model.get_client_model(cut_layer)).to(self.device)
+        server_backbone = copy.deepcopy(model.get_server_model(cut_layer)).to(self.device)
 
         self.client = ClientModel(client_backbone, cut_layer)
         self.server = ServerModel(server_backbone, criterion=criterion)
 
         self.model = model  # Keep reference to full model
+        self._last_grad_norm: float = 0.0  # Track last gradient norm for TVE
+        self._last_grad: Optional[torch.Tensor] = None  # Last gradient tensor for Tier 1 cosine sim
+        self._last_smash_data: Optional[torch.Tensor] = None  # Last smash data for verification
 
     def local_step(
         self,
@@ -95,14 +102,19 @@ class SFLTrainer:
         t_comm_start = time.perf_counter()
         t_comm = t_comm_start - t_comp_start  # Would be actual comm in distributed
 
+        # Store smash data for Tier 1 verification
+        self._last_smash_data = smash_data.detach().clone()
+
         # --- Phase 3: Server forward-backward ---
         loss, grad = self.server.forward_backward(smash_data, labels)
 
         # --- Phase 4: Client backward ---
         self.client.backward(grad)
 
-        # Gradient norm for monitoring
-        grad_norm = grad.norm().item() if grad is not None else 0.0
+        # Gradient norm for monitoring and TVE
+        self._last_grad = grad
+        self._last_grad_norm = grad.norm().item() if grad is not None else 0.0
+        grad_norm = self._last_grad_norm
 
         return TrainResult(
             node_id=self.node_id,
@@ -164,6 +176,18 @@ class SFLTrainer:
             k: v.clone().detach()
             for k, v in self.server.backbone.state_dict().items()
         }
+
+    def get_last_grad_norm(self) -> float:
+        """Return gradient norm from last local_step."""
+        return self._last_grad_norm
+
+    def get_last_grad(self) -> Optional[torch.Tensor]:
+        """Return gradient tensor from last local_step (for Tier 1 verification)."""
+        return self._last_grad
+
+    def get_last_smash_data(self) -> Optional[torch.Tensor]:
+        """Return smash data from last local_step (for Tier 1 verification)."""
+        return self._last_smash_data
 
     def load_client_state(self, state_dict: Dict[str, torch.Tensor]) -> None:
         """Load client-side state from dict."""

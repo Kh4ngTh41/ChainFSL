@@ -85,7 +85,8 @@ class TMCSShapley:
         """
         self.value_fn = value_fn
         n = len(node_ids)
-        M_effective = self.M if self.M is not None else max(50, 3 * n)
+        # Spec requires 1000 permutations for Monte Carlo approximation (Eq. 15)
+        M_effective = max(1000, 3 * n)
 
         # Accumulator: node_id -> sum of marginal contributions
         accum: Dict[int, float] = {nid: 0.0 for nid in node_ids}

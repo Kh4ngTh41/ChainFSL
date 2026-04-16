@@ -214,6 +214,9 @@ class ClientModel:
         Returns:
             Smashed data (activation tensor) — fully detached, no autograd graph.
         """
+        # Set eval mode to prevent BatchNorm running stat updates (which use inplace
+        # operations that can cause autograd version errors when combined with backward)
+        self.backbone.eval()
         with torch.no_grad():
             self._saved_input = x.detach().clone()
             a = self.backbone(x)
@@ -226,7 +229,8 @@ class ClientModel:
         Apply gradient from server to update client parameters.
 
         In split learning, grad_a is dL/d(activation) from server.
-        We need to compute dL/d(params) using chain rule through activation.
+        We compute dL/d(params) by backpropagating through the client forward
+        using grad_a as the upstream gradient.
 
         Args:
             grad_a: Gradient of loss w.r.t. smashed activation (from server).
@@ -239,28 +243,30 @@ class ClientModel:
             self._saved_activation = None
             return
 
-        # Rebuild computation graph: input → ... → activation
-        # Clone saved input to avoid graph reuse issues
+        # Recreate forward computation with gradient tracking
+        # Clone saved input to avoid any graph connection issues
         x = self._saved_input.clone().detach().requires_grad_(True)
 
-        with torch.set_grad_enabled(True):
-            output = self.backbone(x)
-            # Compute dL/d(params) via chain rule through actual forward graph
-            # grad_outputs=grad_a connects server's upstream gradient at output
-            params = list(self.backbone.parameters())
-            grads = torch.autograd.grad(
-                outputs=[output],
-                inputs=params,
-                grad_outputs=[grad_a.to(output.device)],
-                retain_graph=False,
-                allow_unused=False,
-            )
-            # Assign gradients (replace, not accumulate)
-            for p, g in zip(params, grads):
-                if g is not None:
-                    if p.grad is not None:
-                        p.grad.zero_()
-                    p.grad = g
+        # Forward pass under grad enabled to build computation graph
+        output = self.backbone(x)
+
+        # Compute gradients dL/d(params) using chain rule
+        # grad_outputs=grad_a provides the upstream gradient dL/d(output)
+        params = list(self.backbone.parameters())
+        grads = torch.autograd.grad(
+            outputs=[output],
+            inputs=params,
+            grad_outputs=[grad_a.to(output.device)],
+            retain_graph=False,
+            allow_unused=False,
+        )
+
+        # Assign gradients to parameters. torch.autograd.grad computes fresh gradients,
+        # so p.grad = g is sufficient (no need for zero_() which is an inplace operation
+        # that can interfere with concurrent autograd state).
+        for p, g in zip(params, grads):
+            if g is not None:
+                p.grad = g
 
         self.optimizer.step()
         self._saved_input = None
@@ -322,6 +328,9 @@ class ServerModel:
             (loss_value, gradient_at_cut_layer) tuple.
         """
         # All autograd computation inside one isolated context
+        # Use eval() to prevent BatchNorm running stat updates (which use inplace
+        # operations on running_mean/running_var that can cause autograd version errors)
+        self.backbone.eval()
         with torch.set_grad_enabled(True):
             smashed_input = smashed.detach().clone().requires_grad_(True)
             dev = self.device

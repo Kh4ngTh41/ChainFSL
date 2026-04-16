@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Union
 import torch
+import torch.nn as nn
 import numpy as np
 
 
@@ -72,6 +73,69 @@ class CommitmentVerifier:
             v.detach().numpy().tobytes() for v in sorted(model_state.values(), key=lambda x: str(x.shape))
         )
         return hashlib.sha256(state_bytes).digest()
+
+    @staticmethod
+    def verify_gradient_consistency(
+        submitted_grad: torch.Tensor,
+        recomputed_grad: torch.Tensor,
+        threshold: float = 0.95,
+    ) -> bool:
+        """
+        Verify submitted gradient matches recomputed via cosine similarity.
+
+        Per Algorithm 2, Tier 1 verification includes:
+            v ← VerifyGradientConsistency(Δw, A)
+
+        Args:
+            submitted_grad: Gradient tensor submitted by node.
+            recomputed_grad: Gradient recomputed from activations.
+            threshold: Minimum cosine similarity (default 0.95).
+
+        Returns:
+            True if cosine similarity > threshold.
+        """
+        if submitted_grad is None or recomputed_grad is None:
+            return False
+        # Flatten for cosine similarity
+        submitted_flat = submitted_grad.flatten().float()
+        recomputed_flat = recomputed_grad.flatten().float()
+        cos = nn.CosineSimilarity(dim=0)
+        similarity = cos(submitted_flat, recomputed_flat).item()
+        return similarity > threshold
+
+    @staticmethod
+    def recompute_gradient_from_activations(
+        smash_data: torch.Tensor,
+        labels: torch.Tensor,
+        server_backbone: nn.Module,
+        criterion: Optional[nn.Module] = None,
+    ) -> torch.Tensor:
+        """
+        Recompute gradient from smash data and labels for Tier 1 verification.
+
+        Args:
+            smash_data: Activation tensor at cut layer.
+            labels: Ground truth labels.
+            server_backbone: Server-side model.
+            criterion: Loss function.
+
+        Returns:
+            Recomputed gradient tensor.
+        """
+        criterion = criterion or nn.CrossEntropyLoss()
+        server_backbone = server_backbone.eval()  # Use eval mode to prevent BatchNorm running stat updates
+
+        smash_input = smash_data.detach().clone().requires_grad_(True)
+        output = server_backbone(smash_input)
+        loss = criterion(output, labels)
+
+        grad = torch.autograd.grad(
+            outputs=[loss],
+            inputs=[smash_input],
+            retain_graph=False,
+        )[0]
+
+        return grad
 
     # ------------------------------------------------------------------ #
     # Proof generation by tier

@@ -188,7 +188,7 @@ def _save_combined_results(results: Dict[str, Any], path: Path) -> None:
 
     import csv
 
-    all_keys = set()
+    all_keys = {"method"}  # "method" is always present
     for metrics in results.values():
         for m in metrics:
             all_keys.update(m.keys())
