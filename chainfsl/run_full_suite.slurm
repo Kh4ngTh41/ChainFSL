@@ -20,7 +20,7 @@ N_NODES=50
 GLOBAL_ROUNDS=100
 
 module load python312
-source /home/uitchain/datastore/khang/venv/bin/activate
+source /home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv/bin/activate
 unset CUDA_VISIBLE_DEVICES
 
 CHECK_OUT=$(/usr/local/bin/gpu_check.sh $REQUIRED_VRAM $SLURM_JOB_ID)
