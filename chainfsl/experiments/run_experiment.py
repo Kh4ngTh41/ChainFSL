@@ -210,12 +210,10 @@ def run_exp(exp_name: str, args) -> None:
             resume=args.resume,
             checkpoint_dir=args.checkpoint_dir,
         )
+    elif exp_name == "e2":
+        module.run(config)  # E2: Scalability
     else:
-        module.run(
-            config,
-            resume=args.resume,
-            checkpoint_dir=args.checkpoint_dir,
-        )
+        module.run(config)  # E3, E4, E5, E7
 
     print(f"[{exp_name}] Done!")
 

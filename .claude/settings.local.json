@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from src.protocol.chainfsl import ChainFSLProtocol; print\\('OK: chainfsl imports'\\)\")",
+      "Bash(python -c \"from src.haso.gossip import HASOGossip; print\\('OK: gossip imports'\\)\")",
+      "Bash(python3 -c \"from src.protocol.chainfsl import ChainFSLProtocol; print\\('OK: chainfsl imports'\\)\")",
+      "Bash(python3:*)",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

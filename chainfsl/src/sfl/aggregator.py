@@ -87,7 +87,7 @@ class AsyncAggregator:
             if key in layer_updates and layer_weights[key] > 0:
                 new_state[key] = (
                     self.global_state[key].float() + layer_updates[key] / layer_weights[key]
-                ).to(self.global_state[key].dtype)
+                ).to(new_state[key].dtype)
 
         self.global_state = new_state
         self.current_round += 1
