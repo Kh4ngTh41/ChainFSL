@@ -86,13 +86,18 @@ class SplittableResNet18(nn.Module):
             cut_layer: Split point (1-4).
 
         Returns:
-            nn.Sequential containing client layers.
+            nn.Sequential containing client layers with NAMED modules
+            so state_dict keys match the original model (e.g., 'conv1.weight').
         """
-        layers = [self.conv1, self.bn1, self.relu, self.maxpool]
+        seq = nn.Sequential()
+        seq.conv1 = self.conv1
+        seq.bn1 = self.bn1
+        seq.relu = self.relu
+        seq.maxpool = self.maxpool
         block_layers = [self.layer1, self.layer2, self.layer3, self.layer4]
         for i in range(min(cut_layer, 4)):
-            layers.append(block_layers[i])
-        return nn.Sequential(*layers)
+            seq.add_module(f"layer{i+1}", block_layers[i])
+        return seq
 
     def get_server_model(self, cut_layer: int) -> nn.Sequential:
         """
@@ -102,18 +107,21 @@ class SplittableResNet18(nn.Module):
             cut_layer: Split point (1-4).
 
         Returns:
-            nn.Sequential containing server layers (avgpool through fc).
+            nn.Sequential containing server layers with NAMED modules
+            so state_dict keys match the original model.
         """
         if cut_layer > 4:
             # Nothing left for server
             return nn.Sequential(nn.Identity())
 
+        seq = nn.Sequential()
         block_layers = [self.layer1, self.layer2, self.layer3, self.layer4]
-        layers = []
         for i in range(cut_layer, 4):
-            layers.append(block_layers[i])
-        layers += [self.avgpool, nn.Flatten(start_dim=1), self.fc]
-        return nn.Sequential(*layers)
+            seq.add_module(f"layer{i+1}", block_layers[i])
+        seq.avgpool = self.avgpool
+        seq.add_module("flatten", nn.Flatten(start_dim=1))
+        seq.fc = self.fc
+        return seq
 
     def split_models(self, cut_layer: int) -> tuple[nn.Sequential, nn.Sequential]:
         """
