@@ -511,7 +511,11 @@ class ChainFSLProtocol:
                 grad_tensor = trainer.get_last_grad()
                 smash_data = trainer.get_last_smash_data()
 
-                # Build update dict
+                # Generate TVE proof based on tier (MUST generate BEFORE building update dict)
+                proof = self._generate_proof(node, trainer, cut_layer)
+                self._proof_cache[node.node_id] = proof
+
+                # Build update dict - use proof's input_hash (matches verification)
                 update = {
                     "node_id": node.node_id,
                     "cut_layer": cut_layer,
@@ -520,22 +524,11 @@ class ChainFSLProtocol:
                     "server_state": server_state,
                     "data_size": len(loader.dataset),
                     "staleness": self.node_staleness.get(node.node_id, 0),
-                    "input_hash": self._hash_state(client_state),
+                    "input_hash": proof.input_hash,  # FIX: use proof's hash, not model weights hash
                     "smashed_bytes": smashed_bytes,
                     "loss": avg_loss,
                     "gradient_norm": grad_norm,
                 }
-
-                # Store gradient and smash data for Tier 1 cosine similarity verification
-                if grad_tensor is not None and smash_data is not None:
-                    self._grad_cache[node.node_id] = {
-                        "grad": grad_tensor.detach().clone(),
-                        "smash_data": smash_data.detach().clone(),
-                    }
-
-                # Generate TVE proof based on tier
-                proof = self._generate_proof(node, trainer, cut_layer)
-                self._proof_cache[node.node_id] = proof
 
                 # Lazy client attack injection (E4)
                 if node.node_id in self.lazy_node_ids:

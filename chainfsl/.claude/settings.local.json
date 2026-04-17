@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//mnt/f/ChainFSL/**)",
+      "Bash(python3 -c \"from docx import Document; doc = Document\\('DGX - A100.docx'\\); print\\('\\\\n'.join\\([p.text for p in doc.paragraphs]\\)\\)\")",
+      "Bash(unzip -p \"DGX - A100.docx\" word/document.xml)",
+      "Bash(.venv/bin/python --version)",
+      "Bash(.venv/bin/pip --version)"
+    ]
+  }
+}
