@@ -197,11 +197,14 @@ def run_exp(exp_name: str, args) -> None:
     # Load pretrained orchestrator if specified
     pretrained_orchestrator = None
     if args.pretrain_rounds:
-        from pretrain_pipeline import check_pretrained_exists, load_orchestrator
+        from pretrain_pipeline import (
+            check_pretrained_exists,
+            load_orchestrator,
+            pretrain_ppo,
+            zip_pretrain,
+        )
         from src.haso.orchestrator import create_orchestrator
 
-        # Create temporary protocol just to get node profiles
-        # (we'll create proper one in the experiment module)
         n_nodes = config["n_nodes"]
 
         if check_pretrained_exists(args.pretrain_rounds, args.pretrain_dir):
@@ -215,10 +218,37 @@ def run_exp(exp_name: str, args) -> None:
             if pretrained_orchestrator:
                 print(f"[{exp_name}] SUCCESS: Loaded pretrained orchestrator")
             else:
-                print(f"[{exp_name}] WARNING: Failed to load, will train from scratch")
+                print(f"[{exp_name}] Failed to load, training fresh...")
+                orchestrator = pretrain_ppo(
+                    n_nodes=n_nodes,
+                    pretrain_rounds=args.pretrain_rounds,
+                    seed=args.seed,
+                    force_retrain=True,
+                )
+                zip_pretrain(args.pretrain_rounds, args.pretrain_dir)
+                pretrained_orchestrator = load_orchestrator(
+                    rounds=args.pretrain_rounds,
+                    n_nodes=n_nodes,
+                    config=config,
+                    base_dir=args.pretrain_dir,
+                )
         else:
-            print(f"[{exp_name}] WARNING: No pretrained model at pretrainppo/{args.pretrain_rounds}/")
-            print(f"[{exp_name}] Will train from scratch")
+            print(f"[{exp_name}] No pretrained model found at pretrainppo/{args.pretrain_rounds}/")
+            print(f"[{exp_name}] Starting pretrain first...")
+            orchestrator = pretrain_ppo(
+                n_nodes=n_nodes,
+                pretrain_rounds=args.pretrain_rounds,
+                seed=args.seed,
+                force_retrain=False,
+            )
+            zip_path = zip_pretrain(args.pretrain_rounds, args.pretrain_dir)
+            print(f"[{exp_name}] Pretrained and zipped to: {zip_path}")
+            pretrained_orchestrator = load_orchestrator(
+                rounds=args.pretrain_rounds,
+                n_nodes=n_nodes,
+                config=config,
+                base_dir=args.pretrain_dir,
+            )
 
     # Resume from checkpoint if requested
     if args.resume:
