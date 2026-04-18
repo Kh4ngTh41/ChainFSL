@@ -37,6 +37,8 @@ from ..sfl.data_loader import get_dataloaders
 from ..haso.env import SFLNodeEnv
 from ..haso.agent import HaSOAgentPool
 from ..haso.gossip import HASOGossip
+from ..haso.cluster import ClusterManager
+from ..haso.cluster_agent import ClusterAgentPool
 
 from ..tve.commitment import CommitmentVerifier, Proof
 from ..tve.committee import VerificationCommittee, TVEConfig, TieredVerificationEngine
@@ -237,15 +239,69 @@ class ChainFSLProtocol:
         ]
         self.agent_pool: Optional[HaSOAgentPool] = None
         self._orchestrator = None  # Centralized HASO orchestrator (alternative to per-node agents)
+        self.cluster_manager: Optional[ClusterManager] = None
+        self.cluster_agent_pool: Optional[ClusterAgentPool] = None
+
         if self.haso_enabled:
-            self.agent_pool = HaSOAgentPool(
-                envs=haso_envs,
-                learning_rate=config.get("ppo_learning_rate", 3e-4),
-                n_steps=config.get("ppo_n_steps", 512),
-                batch_size=config.get("ppo_batch_size", 64),
-                n_epochs=10,
-                verbose=0,
-            )
+            # Determine if using hierarchical clusters or per-node agents
+            cluster_size = config.get("cluster_size", 0)  # 0 means disabled
+            use_hierarchical = cluster_size > 0 and self.n_nodes % cluster_size == 0
+
+            if use_hierarchical:
+                # Hierarchical MA-HASO: k clusters, a nodes per cluster
+                k = self.n_nodes // cluster_size
+                print(f"[HASO] Hierarchical mode: k={k} clusters, a={cluster_size} nodes/cluster")
+
+                self.cluster_manager = ClusterManager()
+                self.cluster_manager.form_clusters(
+                    n_nodes=self.n_nodes,
+                    cluster_size=cluster_size,
+                    node_profiles=self.nodes,
+                )
+
+                # Create cluster agent pool
+                self.cluster_agent_pool = ClusterAgentPool(
+                    cluster_manager=self.cluster_manager,
+                    node_profiles=self.nodes,
+                )
+
+                # Build env for each cluster-head
+                def make_cluster_env(profile, cluster_id, n_compute):
+                    return SFLNodeEnv(
+                        node_profile=profile,
+                        n_compute_nodes=n_compute,
+                        reward_weights=(
+                            config.get("reward_alpha", 1.0),
+                            config.get("reward_beta", 0.5),
+                            config.get("reward_gamma", 0.1),
+                        ),
+                        max_steps=config.get("global_rounds", 100),
+                        seed=cluster_id,
+                    )
+
+                self.cluster_agent_pool.create_agents(
+                    env_builder=make_cluster_env,
+                    learning_rate=config.get("ppo_learning_rate", 3e-4),
+                    n_steps=config.get("ppo_n_steps", 512),
+                    batch_size=config.get("ppo_batch_size", 64),
+                    n_epochs=10,
+                    verbose=0,
+                )
+
+                # Set gossip cluster manager for cluster-aware routing
+                if hasattr(self, 'gossip'):
+                    self.gossip.set_cluster_manager(self.cluster_manager)
+            else:
+                # Original per-node HaSOAgentPool
+                print(f"[HASO] Per-node mode: {self.n_nodes} agents")
+                self.agent_pool = HaSOAgentPool(
+                    envs=haso_envs,
+                    learning_rate=config.get("ppo_learning_rate", 3e-4),
+                    n_steps=config.get("ppo_n_steps", 512),
+                    batch_size=config.get("ppo_batch_size", 64),
+                    n_epochs=10,
+                    verbose=0,
+                )
 
         # --- TVE ---
         self.tve_enabled = config.get("tve_enabled", True)
@@ -449,6 +505,10 @@ class ChainFSLProtocol:
         if self._orchestrator is not None:
             return self._phase_haso_centralized()
 
+        # Use hierarchical cluster agents if available
+        if self.cluster_agent_pool is not None:
+            return self._phase_haso_hierarchical()
+
         # Fallback: per-node HaSOAgentPool (original implementation)
         if self.agent_pool is None:
             # No HASO at all - use defaults
@@ -539,6 +599,137 @@ class ChainFSLProtocol:
             }
 
         return configs
+
+    def _phase_haso_hierarchical(self) -> Dict[int, Optional[Dict[str, Any]]]:
+        """
+        Phase 1 (Hierarchical): Cluster HASO agents decide for their cluster members.
+
+        Each cluster-head (ClusterHASOAgent) decides configuration for its cluster.
+        Intra-cluster gossip coordinates cluster members.
+        Inter-cluster coordination via cluster-heads.
+
+        Returns:
+            Dict[node_id] -> config dict, or None if node is excluded (OOM).
+        """
+        configs: Dict[int, Optional[Dict[str, Any]]] = {}
+
+        if self.cluster_agent_pool is None:
+            # No cluster agents - fallback
+            return self._phase_haso()  # Use per-node fallback
+
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+
+        # Get decisions from each cluster
+        for cluster_id in self.cluster_manager.clusters.keys():
+            agent = self.cluster_agent_pool.get_agent(cluster_id)
+            if agent is None:
+                continue
+
+            # Get cluster-level observation
+            head_id = self.cluster_manager.get_cluster_head(cluster_id)
+            head_node = self.nodes[head_id] if head_id < len(self.nodes) else self.nodes[0]
+
+            # Build cluster-level observation
+            cluster_members = self.cluster_manager.get_cluster_members(cluster_id)
+            cluster_nodes = [self.nodes[mid] for mid in cluster_members if mid < len(self.nodes)]
+
+            # Get decision from cluster agent
+            obs = self._get_cluster_obs(cluster_nodes, agent.env)
+            decision = agent.decide(obs, deterministic=False)
+
+            # Apply same decision to all cluster members
+            # (In advanced version: per-node decisions from cluster agent)
+            for node in cluster_nodes:
+                node_id = node.node_id
+
+                # Find deepest valid cut layer
+                valid_cut = self._find_deepest_valid_cut_layer(node, memory_map)
+
+                if valid_cut is None:
+                    configs[node_id] = None
+                    continue
+
+                # Use decision from cluster agent (clamped to valid)
+                cut_layer = decision["cut_layer"]
+                if cut_layer > valid_cut:
+                    cut_layer = valid_cut
+
+                configs[node_id] = {
+                    "cut_layer": cut_layer,
+                    "batch_size": decision["batch_size"],
+                    "H": decision["H"],
+                    "target_compute_node": decision.get("target_compute_node", head_id % self.n_nodes),
+                }
+
+        return configs
+
+    def _get_cluster_obs(self, cluster_nodes: list, env) -> np.ndarray:
+        """
+        Get cluster-level observation for ClusterHASOAgent.
+
+        Aggregates state from cluster members.
+
+        Returns normalized state vector for cluster.
+        """
+        import numpy as np
+
+        if not cluster_nodes:
+            return env._get_obs()  # Fallback
+
+        # Aggregate cluster member states
+        mean_flops = np.mean([n.flops_ratio for n in cluster_nodes])
+        mean_ram = np.mean([n.ram_mb for n in cluster_nodes])
+        mean_bw = np.mean([n.bandwidth_mbps for n in cluster_nodes])
+
+        cluster_losses = [self.node_losses.get(n.node_id, 5.0) for n in cluster_nodes]
+        mean_loss = np.mean(cluster_losses) if cluster_losses else 5.0
+
+        cluster_shapley = [self.verification_rates.get(n.node_id, 0.5) for n in cluster_nodes]
+        mean_shapley = np.mean(cluster_shapley) if cluster_shapley else 0.5
+
+        # Cluster reward estimate
+        cluster_rewards = [self.node_progress.get(n.node_id, NodeProgressInfo()).last_reward for n in cluster_nodes]
+        fairness = self._jains_fairness(cluster_rewards) if cluster_rewards else 0.5
+
+        # Intra-cluster gossip availability
+        if cluster_nodes:
+            head_id = cluster_nodes[0].node_id
+            intra_avail = self.gossip.mean_intra_cluster_availability(head_id) if hasattr(self.gossip, 'mean_intra_cluster_availability') else 0.5
+        else:
+            intra_avail = 0.5
+
+        return np.array([
+            mean_flops,
+            1.0 - mean_ram / 8192.0,
+            mean_bw / 100.0,
+            mean_loss / 10.0,
+            mean_shapley,
+            fairness,
+            intra_avail,
+        ], dtype=np.float32)
+
+    def _update_cluster_agents_shapley(self, shapley_vals: Dict[int, float]) -> None:
+        """
+        Update each ClusterHASOAgent with its cluster's Shapley values.
+
+        Args:
+            shapley_vals: Dict mapping node_id -> Shapley value for ALL nodes.
+        """
+        if self.cluster_agent_pool is None:
+            return
+
+        for cluster_id, agent in self.cluster_agent_pool.agents.items():
+            # Get node IDs in this cluster
+            cluster_node_ids = self.cluster_manager.get_cluster_members(cluster_id)
+
+            # Build cluster-specific Shapley dict
+            cluster_shapley = {
+                nid: shapley_vals.get(nid, 0.0)
+                for nid in cluster_node_ids
+            }
+
+            # Update agent with cluster Shapley
+            agent.update_cluster_shapley(cluster_shapley)
 
     def _get_global_obs(self) -> np.ndarray:
         """
@@ -925,6 +1116,11 @@ class ChainFSLProtocol:
             self._orchestrator.update_shapley(shapley_vals)
             update_ts = self.cfg.get("ppo_update_timesteps", 256)
             self._orchestrator.learn(total_timesteps=update_ts)
+        elif self.cluster_agent_pool is not None:
+            # Hierarchical: update each cluster agent
+            self._update_cluster_agents_shapley(shapley_vals)
+            update_ts = self.cfg.get("ppo_update_timesteps", 256)
+            self.cluster_agent_pool.learn_all(total_timesteps=update_ts)
         elif self.agent_pool is not None:
             # Fallback: per-node agents
             self.agent_pool.update_shapley_all(shapley_vals)
