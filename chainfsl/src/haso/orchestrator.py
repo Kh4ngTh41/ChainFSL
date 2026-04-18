@@ -11,12 +11,13 @@ This separates concerns:
 """
 
 import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 import time
 
 from stable_baselines3 import PPO
-from gymnasium import spaces
 
 from .env import SFLNodeEnv
 
@@ -198,7 +199,7 @@ class HASOOrchestrator:
         }
 
 
-class OrchestratorEnv:
+class OrchestratorEnv(gym.Env):
     """
     Gymnasium environment for the centralized orchestrator.
 
@@ -216,6 +217,8 @@ class OrchestratorEnv:
 
     STATE_LOW = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
     STATE_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+
+    metadata = {"render_modes": []}
 
     def __init__(
         self,
