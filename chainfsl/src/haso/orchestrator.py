@@ -262,12 +262,13 @@ class OrchestratorEnv:
 
         # Internal state
         self._step_count = 0
-        self._state = self._get_obs()
-
-        # Historical metrics
+        # Historical metrics - MUST be initialized BEFORE _get_obs() call
         self._shapley_ema = 0.1
         self._mean_loss = 5.0
         self._fairness = 0.5
+
+        # Compute initial observation AFTER historical metrics are set
+        self._state = self._get_obs()
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> tuple:
         """Reset environment."""
