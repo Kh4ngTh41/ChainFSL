@@ -45,6 +45,8 @@ def run(
     skip_baselines: bool = False,
     resume: bool = False,
     checkpoint_dir: str = "./checkpoints",
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
 ) -> Dict[str, Any]:
     """
     Run E1 experiment.
@@ -54,6 +56,8 @@ def run(
         skip_baselines: If True, skip baseline comparisons.
         resume: If True, resume from latest checkpoint.
         checkpoint_dir: Directory for checkpoint files.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
 
     Returns:
         Dict of results for each method.
@@ -68,7 +72,10 @@ def run(
     # --- Method 1: ChainFSL (full HASO) ---
     print("\n--- ChainFSL (HASO enabled) ---")
     chainfsl_cfg = {**config, "haso_enabled": True, "tve_enabled": True, "gtm_enabled": True}
-    metrics_chainfsl = _run_chainfsl(chainfsl_cfg)
+    metrics_chainfsl = _run_chainfsl(
+        chainfsl_cfg,
+        pretrained_orchestrator=pretrained_orchestrator,
+    )
     results["chainfsl"] = metrics_chainfsl
     save_results_csv("e1_chainfsl", metrics_chainfsl, config["log_dir"])
     print_summary("chainfsl", metrics_chainfsl)
@@ -112,7 +119,10 @@ def run(
     return results
 
 
-def _run_chainfsl(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _run_chainfsl(
+    config: Dict[str, Any],
+    pretrained_orchestrator=None,
+) -> List[Dict[str, Any]]:
     """Run ChainFSL protocol."""
     import os
     # Use log_dir for ledger DB to ensure Windows compatibility
@@ -125,6 +135,11 @@ def _run_chainfsl(config: Dict[str, Any]) -> List[Dict[str, Any]]:
         device=None,  # auto
         db_path=db_path,
     )
+
+    # Attach pretrained orchestrator if available
+    if pretrained_orchestrator is not None:
+        print(f"  [ChainFSL] Using pretrained orchestrator")
+        protocol._orchestrator = pretrained_orchestrator
 
     metrics = protocol.run(
         total_rounds=config["global_rounds"],

@@ -26,11 +26,20 @@ from src.protocol.chainfsl import ChainFSLProtocol
 from experiments.utils import save_results_csv, print_summary, ensure_dir
 
 
-def run(config: Dict[str, Any]) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
+) -> Dict[str, Any]:
     """
     Run E4 security experiment.
 
     Tests lazy client attack at fractions [0.0, 0.1, 0.2, 0.3].
+
+    Args:
+        config: Base config dict.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
     print("E4: Security Evaluation")
@@ -60,6 +69,11 @@ def run(config: Dict[str, Any]) -> Dict[str, Any]:
                 device=None,
                 db_path=f"/tmp/chainfsl_e4_{key}.db",
             )
+
+            # Attach pretrained orchestrator if available
+            if pretrained_orchestrator is not None:
+                print(f"  [E4:{key}] Using pretrained orchestrator")
+                protocol._orchestrator = pretrained_orchestrator
 
             # Inject attack
             n_attack = int(fraction * config["n_nodes"])

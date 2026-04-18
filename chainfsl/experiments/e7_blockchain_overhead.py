@@ -24,11 +24,20 @@ from src.protocol.chainfsl import ChainFSLProtocol
 from experiments.utils import save_results_csv, print_summary, ensure_dir
 
 
-def run(config: Dict[str, Any]) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
+) -> Dict[str, Any]:
     """
     Run E7 blockchain overhead experiment.
 
     Measures ledger overhead with and without blockchain module.
+
+    Args:
+        config: Base config dict.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
     print("E7: Blockchain Overhead")
@@ -46,6 +55,11 @@ def run(config: Dict[str, Any]) -> Dict[str, Any]:
         device=None,
         db_path="/tmp/chainfsl_e7_blockchain.db",
     )
+
+    # Attach pretrained orchestrator if available
+    if pretrained_orchestrator is not None:
+        print(f"  [E7] Using pretrained orchestrator")
+        protocol._orchestrator = pretrained_orchestrator
 
     blockchain_metrics = protocol.run(total_rounds=30, eval_every=5)
     blockchain_metrics_dicts = [m.to_dict() for m in blockchain_metrics]

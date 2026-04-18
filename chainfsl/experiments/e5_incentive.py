@@ -25,11 +25,20 @@ from src.gtm.tokenomics import TokenomicsEngine, TokenomicsConfig
 from experiments.utils import save_results_csv, print_summary, ensure_dir
 
 
-def run(config: Dict[str, Any]) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
+) -> Dict[str, Any]:
     """
     Run E5 incentive experiment.
 
     Validates that honest participation dominates alternative strategies.
+
+    Args:
+        config: Base config dict.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
     print("E5: Incentive Mechanism")
@@ -47,6 +56,11 @@ def run(config: Dict[str, Any]) -> Dict[str, Any]:
         device=None,
         db_path="/tmp/chainfsl_e5_honest.db",
     )
+
+    # Attach pretrained orchestrator if available
+    if pretrained_orchestrator is not None:
+        print(f"  [E5] Using pretrained orchestrator")
+        protocol._orchestrator = pretrained_orchestrator
 
     honest_metrics = protocol.run(total_rounds=30, eval_every=5)
     honest_metrics_dicts = [m.to_dict() for m in honest_metrics]

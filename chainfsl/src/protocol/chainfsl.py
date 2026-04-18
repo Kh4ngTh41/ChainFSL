@@ -72,6 +72,13 @@ class RoundMetrics:
     shapley_variance: float
     mean_verification_ms: float
     ledger_size_kb: float
+    # Latency breakdown (seconds)
+    ppo_update_time: float = 0.0
+    shapley_time: float = 0.0
+    train_time: float = 0.0
+    verification_time: float = 0.0
+    comm_time: float = 0.0
+    avg_node_train_time: float = 0.0  # avg per-node training time
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,6 +95,12 @@ class RoundMetrics:
             "shapley_variance": self.shapley_variance,
             "mean_verification_ms": self.mean_verification_ms,
             "ledger_size_kb": self.ledger_size_kb,
+            "ppo_update_time": self.ppo_update_time,
+            "shapley_time": self.shapley_time,
+            "train_time": self.train_time,
+            "verification_time": self.verification_time,
+            "comm_time": self.comm_time,
+            "avg_node_train_time": self.avg_node_train_time,
         }
 
 
@@ -223,6 +236,7 @@ class ChainFSLProtocol:
             for n in self.nodes
         ]
         self.agent_pool: Optional[HaSOAgentPool] = None
+        self._orchestrator = None  # Centralized HASO orchestrator (alternative to per-node agents)
         if self.haso_enabled:
             self.agent_pool = HaSOAgentPool(
                 envs=haso_envs,
@@ -314,33 +328,55 @@ class ChainFSLProtocol:
             self.current_round = t
             round_start = time.perf_counter()
 
-            # Phase 1: HASO decisions
+            # Phase 1: HASO decisions (fast, no timing needed)
             configs = self._phase_haso()
 
             # Phase 2-3: SFL training + TVE proof generation
+            train_start = time.perf_counter()
             updates, proofs, train_losses = self._phase_training(configs)
+            train_elapsed = time.perf_counter() - train_start
+
+            # Per-node train time tracking (from train_losses keys)
+            node_train_times = [train_elapsed] * len(train_losses)
 
             # Phase 4: TVE verification
+            verif_start = time.perf_counter()
             verif_results = self._phase_verification(updates, proofs)
+            verif_elapsed = time.perf_counter() - verif_start
 
             # Phase 5: Aggregation
             valid_ids = self.tve.committee.get_valid_node_ids(verif_results)
             valid_updates = [u for u in updates if u["node_id"] in valid_ids]
             self._phase_aggregation(valid_updates)
 
-            # Phase 6: GTM rewards
+            # Phase 6: GTM rewards (includes Shapley)
+            shapley_start = time.perf_counter()
             shapley_vals, rewards = self._phase_gtm(updates, verif_results)
+            shapley_elapsed = time.perf_counter() - shapley_start
 
             # Phase 7: Blockchain commit
             self._phase_blockchain(verif_results, rewards, shapley_vals)
 
-            # Phase 8: HASO policy update
+            # Phase 8: HASO policy update (PPO)
+            ppo_start = time.perf_counter()
             self._phase_haso_update(shapley_vals, rewards)
+            ppo_elapsed = time.perf_counter() - ppo_start
 
-            # Metrics
+            # Total elapsed
             elapsed = time.perf_counter() - round_start
+
+            # Compute comm overhead estimate (smashed data * n_nodes in GB)
+            comm_estimate = sum(u.get("smashed_bytes", 0) for u in updates) / 1e9
+            avg_node_train = train_elapsed / max(len(train_losses), 1)
+
             metrics = self._collect_metrics(
-                t, elapsed, train_losses, verif_results, rewards, shapley_vals
+                t, elapsed, train_losses, verif_results, rewards, shapley_vals,
+                ppo_update_time=ppo_elapsed,
+                shapley_time=shapley_elapsed,
+                train_time=train_elapsed,
+                verification_time=verif_elapsed,
+                comm_time=comm_estimate,
+                avg_node_train_time=avg_node_train,
             )
             self.metrics_history.append(metrics)
 
@@ -398,8 +434,24 @@ class ChainFSLProtocol:
         """
         configs: Dict[int, Optional[Dict[str, Any]]] = {}
 
-        if not self.haso_enabled or self.agent_pool is None:
+        if not self.haso_enabled:
             # Ablation: fixed uniform cut layer 2
+            for node in self.nodes:
+                configs[node.node_id] = {
+                    "cut_layer": 2,
+                    "batch_size": self.cfg.get("batch_size_default", 32),
+                    "H": 1,
+                    "target_compute_node": 0,
+                }
+            return configs
+
+        # Use centralized orchestrator if available (reduces overhead vs per-node agents)
+        if self._orchestrator is not None:
+            return self._phase_haso_centralized()
+
+        # Fallback: per-node HaSOAgentPool (original implementation)
+        if self.agent_pool is None:
+            # No HASO at all - use defaults
             for node in self.nodes:
                 configs[node.node_id] = {
                     "cut_layer": 2,
@@ -446,6 +498,77 @@ class ChainFSLProtocol:
             }
 
         return configs
+
+    def _phase_haso_centralized(self) -> Dict[int, Optional[Dict[str, Any]]]:
+        """
+        Phase 1 (Centralized): Single orchestrator decides for all nodes.
+
+        According to ChainFSL_Implementation_Plan.md Section 1.1:
+        One Orchestrator runs PPO for all nodes, reducing overhead vs per-node agents.
+        """
+        configs: Dict[int, Optional[Dict[str, Any]]] = {}
+
+        # Get global observation for orchestrator
+        obs = self._get_global_obs()
+
+        # Get decisions from centralized orchestrator
+        decisions = self._orchestrator.decide(obs, deterministic=False)
+
+        # Enforce memory constraints and build configs
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+
+        for node, decision in zip(self.nodes, decisions):
+            node_id = node.node_id
+
+            # Find deepest valid cut layer
+            valid_cut = self._find_deepest_valid_cut_layer(node, memory_map)
+
+            if valid_cut is None:
+                configs[node_id] = None
+                continue
+
+            cut_layer = decision["cut_layer"]
+            if cut_layer > valid_cut:
+                cut_layer = valid_cut
+
+            configs[node_id] = {
+                "cut_layer": cut_layer,
+                "batch_size": decision["batch_size"],
+                "H": decision["H"],
+                "target_compute_node": decision["target_compute_node"],
+            }
+
+        return configs
+
+    def _get_global_obs(self) -> np.ndarray:
+        """
+        Get global observation for centralized orchestrator.
+
+        Returns normalized state vector [mean_cpu, mean_mem, mean_bw, mean_loss, shapley, fairness, n_nodes_norm].
+        """
+        import numpy as np
+
+        mean_flops = np.mean([n.flops_ratio for n in self.nodes])
+        mean_ram = np.mean([n.ram_mb for n in self.nodes])
+        mean_bw = np.mean([n.bandwidth_mbps for n in self.nodes])
+        mean_loss = np.mean(list(self.node_losses.values())) if self.node_losses else 5.0
+
+        # Mean Shapley (approximation from last round)
+        mean_shapley = np.mean(list(self.verification_rates.values())) if self.verification_rates else 0.5
+
+        # Fairness estimate
+        reward_values = [self.node_progress[n.node_id].last_reward for n in self.nodes]
+        fairness = self._jains_fairness(reward_values) if reward_values else 0.5
+
+        return np.array([
+            mean_flops,
+            1.0 - mean_ram / 8192.0,
+            mean_bw / 100.0,
+            mean_loss / 10.0,
+            mean_shapley,
+            fairness,
+            self.n_nodes / 50.0,
+        ], dtype=np.float32)
 
     # -------------------------------------------------------------------------
     # Phase 2-3: SFL Training + TVE proof generation
@@ -794,14 +917,21 @@ class ChainFSLProtocol:
 
     def _phase_haso_update(self, shapley_vals: Dict[int, float], rewards: Dict[int, float]) -> None:
         """Phase 8: Update PPO policies with Shapley-based reward shaping."""
-        if not self.haso_enabled or self.agent_pool is None:
+        if not self.haso_enabled:
             return
 
-        self.agent_pool.update_shapley_all(shapley_vals)
-        # PPO needs sufficient timesteps to learn. 64 is far too little.
-        # Use configurable ppo_update_timesteps from config (default 256)
-        update_ts = self.cfg.get("ppo_update_timesteps", 256)
-        self.agent_pool.learn_all(total_timesteps=update_ts)
+        # Use centralized orchestrator if available
+        if self._orchestrator is not None:
+            self._orchestrator.update_shapley(shapley_vals)
+            update_ts = self.cfg.get("ppo_update_timesteps", 256)
+            self._orchestrator.learn(total_timesteps=update_ts)
+        elif self.agent_pool is not None:
+            # Fallback: per-node agents
+            self.agent_pool.update_shapley_all(shapley_vals)
+            update_ts = self.cfg.get("ppo_update_timesteps", 256)
+            self.agent_pool.learn_all(total_timesteps=update_ts)
+        else:
+            return
 
         # Update per-node reward tracking
         for node_id, reward in rewards.items():
@@ -822,6 +952,12 @@ class ChainFSLProtocol:
         verif_results: Dict[int, Any],
         rewards: Dict[int, float],
         shapley_vals: Dict[int, float],
+        ppo_update_time: float = 0.0,
+        shapley_time: float = 0.0,
+        train_time: float = 0.0,
+        verification_time: float = 0.0,
+        comm_time: float = 0.0,
+        avg_node_train_time: float = 0.0,
     ) -> RoundMetrics:
         """Collect per-round metrics."""
         n_participants = len(train_losses)
@@ -869,6 +1005,12 @@ class ChainFSLProtocol:
             shapley_variance=var_shapley,
             mean_verification_ms=mean_verif_ms,
             ledger_size_kb=ledger_kb,
+            ppo_update_time=ppo_update_time,
+            shapley_time=shapley_time,
+            train_time=train_time,
+            verification_time=verification_time,
+            comm_time=comm_time,
+            avg_node_train_time=avg_node_train_time,
         )
 
     def _evaluate(self) -> Dict[str, float]:

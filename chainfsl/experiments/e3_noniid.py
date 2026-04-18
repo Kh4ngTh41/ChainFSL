@@ -24,11 +24,20 @@ from src.protocol.chainfsl import ChainFSLProtocol
 from experiments.utils import save_results_csv, print_summary, ensure_dir
 
 
-def run(config: Dict[str, Any]) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
+) -> Dict[str, Any]:
     """
     Run E3 Non-IID experiment.
 
     Varies Dirichlet alpha across [0.1, 0.5, 1.0, 10.0].
+
+    Args:
+        config: Base config dict.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
     print("E3: Non-IID Data Heterogeneity")
@@ -47,6 +56,11 @@ def run(config: Dict[str, Any]) -> Dict[str, Any]:
             device=None,
             db_path=f"/tmp/chainfsl_e3_a{alpha}.db",
         )
+
+        # Attach pretrained orchestrator if available
+        if pretrained_orchestrator is not None:
+            print(f"  [E3:alpha={alpha}] Using pretrained orchestrator")
+            protocol._orchestrator = pretrained_orchestrator
 
         metrics = protocol.run(total_rounds=cfg["global_rounds"], eval_every=5)
         metrics_dicts = [m.to_dict() for m in metrics]

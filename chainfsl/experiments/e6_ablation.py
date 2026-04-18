@@ -41,7 +41,14 @@ ABLATION_CONFIGS = {
 }
 
 
-def run(config: Dict[str, Any], ablation_type: str = None) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    ablation_type: str = None,
+    resume: bool = False,
+    checkpoint_dir: str = "./checkpoints",
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
+) -> Dict[str, Any]:
     """
     Run E6 ablation study.
 
@@ -49,6 +56,10 @@ def run(config: Dict[str, Any], ablation_type: str = None) -> Dict[str, Any]:
         config: Base config dict.
         ablation_type: If provided, run only that specific ablation variant.
                        Otherwise run all variants.
+        resume: If True, resume from checkpoint.
+        checkpoint_dir: Directory for checkpoint files.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
     print("E6: Ablation Study")
@@ -80,6 +91,11 @@ def run(config: Dict[str, Any], ablation_type: str = None) -> Dict[str, Any]:
             device=None,
             db_path=f"/tmp/chainfsl_e6_{variant}.db",
         )
+
+        # Attach pretrained orchestrator only if HASO is enabled
+        if pretrained_orchestrator is not None and flags["haso"]:
+            print(f"  [E6:{variant}] Using pretrained orchestrator")
+            protocol._orchestrator = pretrained_orchestrator
 
         metrics = protocol.run(total_rounds=cfg["global_rounds"], eval_every=5)
         metrics_dicts = [m.to_dict() for m in metrics]

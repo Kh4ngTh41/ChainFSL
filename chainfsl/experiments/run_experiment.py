@@ -146,6 +146,17 @@ Examples:
         default="./checkpoints",
         help="Directory for checkpoint files",
     )
+    parser.add_argument(
+        "--pretrain_rounds",
+        type=int,
+        default=None,
+        help="Load pretrained orchestrator with this many rounds (e.g., 200, 500)",
+    )
+    parser.add_argument(
+        "--pretrain_dir",
+        default="pretrainppo",
+        help="Directory containing pretrained models (default: pretrainppo)",
+    )
     return parser.parse_args()
 
 
@@ -183,13 +194,37 @@ def run_exp(exp_name: str, args) -> None:
     ensure_dir(args.log_dir)
     ensure_dir(args.checkpoint_dir)
 
+    # Load pretrained orchestrator if specified
+    pretrained_orchestrator = None
+    if args.pretrain_rounds:
+        from pretrain_pipeline import check_pretrained_exists, load_orchestrator
+        from src.haso.orchestrator import create_orchestrator
+
+        # Create temporary protocol just to get node profiles
+        # (we'll create proper one in the experiment module)
+        n_nodes = config["n_nodes"]
+
+        if check_pretrained_exists(args.pretrain_rounds, args.pretrain_dir):
+            print(f"[{exp_name}] Loading pretrained orchestrator: {args.pretrain_rounds} rounds")
+            pretrained_orchestrator = load_orchestrator(
+                rounds=args.pretrain_rounds,
+                n_nodes=n_nodes,
+                config=config,
+                base_dir=args.pretrain_dir,
+            )
+            if pretrained_orchestrator:
+                print(f"[{exp_name}] SUCCESS: Loaded pretrained orchestrator")
+            else:
+                print(f"[{exp_name}] WARNING: Failed to load, will train from scratch")
+        else:
+            print(f"[{exp_name}] WARNING: No pretrained model at pretrainppo/{args.pretrain_rounds}/")
+            print(f"[{exp_name}] Will train from scratch")
+
     # Resume from checkpoint if requested
     if args.resume:
         checkpoint_path = _get_latest_checkpoint(args.checkpoint_dir, exp_name)
         if checkpoint_path:
             print(f"[{exp_name}] Resuming from checkpoint: {checkpoint_path}")
-            # Note: actual resume logic depends on experiment module support
-            # The experiment module's run() function should handle resume
         else:
             print(f"[{exp_name}] No checkpoint found in {args.checkpoint_dir}, starting fresh")
 
@@ -202,6 +237,8 @@ def run_exp(exp_name: str, args) -> None:
             skip_baselines=getattr(args, "skip_baselines", False),
             resume=args.resume,
             checkpoint_dir=args.checkpoint_dir,
+            pretrained_orchestrator=pretrained_orchestrator,
+            pretrain_dir=args.pretrain_dir,
         )
     elif exp_name == "e6":
         module.run(
@@ -209,11 +246,13 @@ def run_exp(exp_name: str, args) -> None:
             ablation_type=args.ablation,
             resume=args.resume,
             checkpoint_dir=args.checkpoint_dir,
+            pretrained_orchestrator=pretrained_orchestrator,
+            pretrain_dir=args.pretrain_dir,
         )
     elif exp_name == "e2":
-        module.run(config)  # E2: Scalability
+        module.run(config, pretrained_orchestrator=pretrained_orchestrator, pretrain_dir=args.pretrain_dir)
     else:
-        module.run(config)  # E3, E4, E5, E7
+        module.run(config, pretrained_orchestrator=pretrained_orchestrator, pretrain_dir=args.pretrain_dir)
 
     print(f"[{exp_name}] Done!")
 
@@ -242,9 +281,6 @@ def main():
     else:
         run_exp(args.exp, args)
 
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()

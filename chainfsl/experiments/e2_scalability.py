@@ -23,11 +23,20 @@ from src.protocol.chainfsl import ChainFSLProtocol
 from experiments.utils import build_config, save_results_csv, print_summary, ensure_dir
 
 
-def run(config: Dict[str, Any]) -> Dict[str, Any]:
+def run(
+    config: Dict[str, Any],
+    pretrained_orchestrator=None,
+    pretrain_dir: str = "pretrainppo",
+) -> Dict[str, Any]:
     """
     Run E2 scalability experiment.
 
     Varies n_nodes across [5, 10, 20, 50] and measures scaling behavior.
+
+    Args:
+        config: Base config dict.
+        pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
     print("E2: Scalability")
@@ -46,6 +55,11 @@ def run(config: Dict[str, Any]) -> Dict[str, Any]:
             device=None,
             db_path=f"/tmp/chainfsl_e2_n{n_nodes}.db",
         )
+
+        # Attach pretrained orchestrator if available
+        if pretrained_orchestrator is not None:
+            print(f"  [E2:n={n_nodes}] Using pretrained orchestrator")
+            protocol._orchestrator = pretrained_orchestrator
 
         metrics = protocol.run(total_rounds=cfg["global_rounds"], eval_every=10)
         metrics_dicts = [m.to_dict() for m in metrics]

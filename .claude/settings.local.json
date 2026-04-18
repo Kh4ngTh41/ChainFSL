@@ -5,7 +5,8 @@
       "Bash(python -c \"from src.haso.gossip import HASOGossip; print\\('OK: gossip imports'\\)\")",
       "Bash(python3 -c \"from src.protocol.chainfsl import ChainFSLProtocol; print\\('OK: chainfsl imports'\\)\")",
       "Bash(python3:*)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python -m py_compile experiments/e5_incentive.py experiments/e7_blockchain_overhead.py)"
     ]
   }
 }
