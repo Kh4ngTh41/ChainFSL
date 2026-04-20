@@ -2,8 +2,8 @@
 """
 Lightweight PPO Pretrain for ChainFSL HASO.
 
-Only trains the PPO agent WITHOUT full TVE/Shapley overhead.
-This is for pretraining the HASO decision policy only.
+Trains PPO agent directly WITHOUT full protocol overhead.
+Fast pretraining for HASO decision policy.
 
 Usage:
     python pretrain_simple.py --rounds 100 --n_nodes 10
@@ -20,7 +20,6 @@ import sys
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.haso.orchestrator import HASOOrchestrator
-from src.haso.cluster import ClusterManager
 from src.emulator.node_profile import generate_hardware_profiles
 
 
@@ -28,57 +27,59 @@ def simple_pretrain(
     n_nodes: int,
     pretrain_rounds: int,
     seed: int = 42,
-    log_dir: str = "./logs",
+    save_dir: str = "pretrainppo",
 ) -> dict:
     """
-    Lightweight PPO pretrain - no TVE/Shapley overhead.
+    Lightweight PPO pretrain - trains and saves directly.
 
     Args:
         n_nodes: Number of nodes.
         pretrain_rounds: Rounds to train PPO.
         seed: Random seed.
-        log_dir: Directory for logs.
+        save_dir: Directory to save model.
 
     Returns:
         Dict with pretrain stats.
     """
     print(f"[Pretrain] Lightweight mode: {pretrain_rounds} rounds, {n_nodes} nodes")
 
-    # Generate fake node profiles
+    # Generate node profiles
     profiles = generate_hardware_profiles(n_nodes, seed=seed)
 
-    # Create orchestrator
+    # Create orchestrator with PPO
     orchestrator = HASOOrchestrator(
         n_nodes=n_nodes,
         node_profiles=profiles,
         reward_weights=(1.0, 0.5, 0.1),
         learning_rate=3e-4,
-        n_steps=128,  # Smaller for speed
-        batch_size=32,  # Smaller for speed
-        n_epochs=5,    # Fewer epochs
+        n_steps=128,
+        batch_size=64,
+        n_epochs=5,
         verbose=1,
     )
 
-    print(f"[Pretrain] Training PPO...")
+    save_path = Path(save_dir) / str(pretrain_rounds) / "orchestrator.zip"
+
+    print(f"[Pretrain] Training PPO for {pretrain_rounds} rounds...")
     start_time = time.perf_counter()
 
-    # Train PPO directly without full protocol
-    # Each "step" = one HASO decision round
+    # Train PPO directly using env
+    # Each round: reset env, run a few steps, then learn
     for round_i in range(pretrain_rounds):
-        # Simulate a training round
         obs = orchestrator.env.reset()
         done = False
         total_reward = 0
 
-        # Run a few steps per round
-        for step_i in range(3):
+        # Run a few steps per round (3-5 steps is enough for PPO)
+        for _ in range(5):
             action, _ = orchestrator.model.predict(obs, deterministic=False)
             obs, reward, done, _, info = orchestrator.env.step(action)
             total_reward += reward
             if done:
                 obs = orchestrator.env.reset()
+                break
 
-        # Learn after each round
+        # Update PPO after each round
         orchestrator.model.learn(
             total_timesteps=128,
             reset_num_timesteps=False,
@@ -90,7 +91,25 @@ def simple_pretrain(
             print(f"  Round {round_i+1}/{pretrain_rounds} - elapsed: {elapsed:.1f}s")
 
     elapsed = time.perf_counter() - start_time
-    print(f"[Pretrain] Done in {elapsed:.1f}s")
+    print(f"[Pretrain] Training complete in {elapsed:.1f}s")
+
+    # Ensure save directory exists
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save trained model
+    orchestrator.save(str(save_path))
+    print(f"[Pretrain] Saved to {save_path}")
+
+    # Save metrics
+    metrics = {
+        "pretrain_rounds": pretrain_rounds,
+        "n_nodes": n_nodes,
+        "seed": seed,
+        "elapsed_seconds": elapsed,
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(save_path.parent / "pretrain_metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
 
     return {
         "status": "trained",
@@ -106,51 +125,21 @@ def main():
     parser.add_argument("--rounds", type=int, default=100, help="Pretrain rounds")
     parser.add_argument("--n_nodes", type=int, default=10, help="Number of nodes")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--log_dir", default="./logs", help="Log directory")
     parser.add_argument("--save_dir", default="pretrainppo", help="Save directory")
 
     args = parser.parse_args()
 
-    # Create save dir
-    save_dir = Path(args.save_dir) / str(args.rounds)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # Run pretrain
     result = simple_pretrain(
         n_nodes=args.n_nodes,
         pretrain_rounds=args.rounds,
         seed=args.seed,
-        log_dir=args.log_dir,
+        save_dir=args.save_dir,
     )
 
-    # Create orchestrator again to save
-    profiles = generate_hardware_profiles(args.n_nodes, seed=args.seed)
-    orchestrator = HASOOrchestrator(
-        n_nodes=args.n_nodes,
-        node_profiles=profiles,
-        verbose=0,
-    )
-
-    # Train briefly to initialize
-    orchestrator.model.learn(total_timesteps=100, reset_num_timesteps=True, progress_bar=False)
-
-    # Save
-    save_path = save_dir / "orchestrator.zip"
-    orchestrator.save(str(save_path))
-    print(f"[Pretrain] Saved to {save_path}")
-
-    # Save metrics
-    metrics = {
-        "pretrain_rounds": args.rounds,
-        "n_nodes": args.n_nodes,
-        "seed": args.seed,
-        "elapsed_seconds": result["elapsed_seconds"],
-        "timestamp": datetime.now().isoformat(),
-    }
-    with open(save_dir / "pretrain_metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
-
-    print(f"[Pretrain] Complete!")
+    print(f"\n[PRETRAIN COMPLETE]")
+    print(f"  Rounds: {result['pretrain_rounds']}")
+    print(f"  Time: {result['elapsed_seconds']:.1f}s")
+    print(f"  Saved to: {args.save_dir}/{args.rounds}/orchestrator.zip")
 
 
 if __name__ == "__main__":
