@@ -45,24 +45,19 @@ export CUDA_VISIBLE_DEVICES=$BEST_GPU
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
 # =========================================================
-# PRETRAIN PPO - Auto-detect: skip if exists
+# PRETRAIN PPO - Lightweight, skip if exists
 # =========================================================
 echo "=========================================="
 echo "PPO Pretrain Check"
 echo "=========================================="
 if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
-    echo "No pretrained model found. Training PPO for $PRETRAIN_ROUNDS rounds..."
-    python3 -c "
-from pretrain_pipeline import pretrain_ppo, zip_pretrain
-result = pretrain_ppo(
-    n_nodes=$N_NODES,
-    pretrain_rounds=$PRETRAIN_ROUNDS,
-    seed=42,
-    force_retrain=False,
-)
-zip_path = zip_pretrain($PRETRAIN_ROUNDS, 'pretrainppo')
-print(f'Pretrained and zipped to: {zip_path}')
-"
+    echo "No pretrained model found. Training PPO (lightweight) for $PRETRAIN_ROUNDS rounds..."
+    python3 pretrain_simple.py \
+        --rounds $PRETRAIN_ROUNDS \
+        --n_nodes $N_NODES \
+        --seed 42 \
+        --save_dir $PRETRAIN_DIR
+    echo "Pretrain complete!"
 else
     echo "Pretrained model FOUND at $PRETRAIN_DIR/$PRETRAIN_ROUNDS/ - skipping pretrain"
 fi
