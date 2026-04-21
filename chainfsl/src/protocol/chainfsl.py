@@ -219,7 +219,7 @@ class ChainFSLProtocol:
 
         # --- Network & Gossip ---
         self.net = NetworkEmulator(variance=0.3)
-        self.gossip = GossipProtocol(fanout=3)
+        self.gossip = HASOGossip(fanout=3)
 
         # --- HASO ---
         self.haso_enabled = config.get("haso_enabled", True)
