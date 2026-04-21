@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 import torch
 import numpy as np
+from tqdm import tqdm
 
 from ..emulator.node_profile import HardwareProfile
 from ..emulator.tier_factory import create_nodes
@@ -380,12 +381,36 @@ class ChainFSLProtocol:
         Returns:
             List of RoundMetrics, one per round.
         """
+        print(f"\n{'='*70}")
+        print(f"ChainFSL Training Summary")
+        print(f"{'='*70}")
+        print(f"  Nodes:        {self.n_nodes}")
+        print(f"  Rounds:       {total_rounds}")
+        print(f"  Eval every:    {eval_every}")
+        print(f"  HASO:         {'Enabled' if self.haso_enabled else 'Disabled'}")
+        print(f"  TVE:          {'Enabled' if self.tve_enabled else 'Disabled'}")
+        print(f"  GTM:          {'Enabled' if self.gtm_enabled else 'Disabled'}")
+        print(f"{'='*70}\n")
+
+        # Per-round progress with tqdm
+        pbar = tqdm(total=total_rounds, desc="Global Rounds", unit="round")
+
         for t in range(1, total_rounds + 1):
             self.current_round = t
             round_start = time.perf_counter()
 
             # Phase 1: HASO decisions (fast, no timing needed)
             configs = self._phase_haso()
+
+            # Log HASO decisions for each node
+            if self.haso_enabled:
+                haso_decisions = []
+                for nid, cfg in configs.items():
+                    if cfg:
+                        haso_decisions.append(f"N{nid}:L{cfg['cut_layer']}->T{cfg['target_compute_node']}")
+                    else:
+                        haso_decisions.append(f"N{nid}:EXCLUDED")
+                pbar.write(f"  Round {t} HASO: {' | '.join(haso_decisions[:5])}{'...' if len(haso_decisions)>5 else ''}")
 
             # Phase 2-3: SFL training + TVE proof generation
             train_start = time.perf_counter()
@@ -394,6 +419,17 @@ class ChainFSLProtocol:
 
             # Per-node train time tracking (from train_losses keys)
             node_train_times = [train_elapsed] * len(train_losses)
+
+            # Log training results
+            train_details = []
+            for nid, loss in train_losses.items():
+                cfg = configs.get(nid)
+                if cfg:
+                    cut = cfg.get('cut_layer', '?')
+                    target = cfg.get('target_compute_node', '?')
+                    train_details.append(f"N{nid}(L{cut}->T{target}):{loss:.3f}")
+            if train_details:
+                pbar.write(f"  Round {t} Train: {' | '.join(train_details[:5])}{'...' if len(train_details)>5 else ''}")
 
             # Phase 4: TVE verification
             verif_start = time.perf_counter()
@@ -436,12 +472,22 @@ class ChainFSLProtocol:
             )
             self.metrics_history.append(metrics)
 
+            # Update progress bar with metrics
+            pbar.set_postfix({
+                "loss": f"{metrics.train_loss:.3f}",
+                "acc": f"{metrics.test_acc:.1f}%",
+                "valid": f"{len(valid_updates)}/{len(updates)}",
+            })
+            pbar.update(1)
+
             if t % eval_every == 0 or t == total_rounds:
                 eval_result = self._evaluate()
                 test_acc = eval_result.get("accuracy", 0.0) if isinstance(eval_result, dict) else eval_result
                 metrics.test_acc = test_acc
                 self._log_round(t, metrics)
+                pbar.write(f"  [Round {t}] EVAL: acc={test_acc:.2f}%, loss={metrics.train_loss:.3f}, valid={len(valid_updates)}/{len(updates)}")
 
+        pbar.close()
         return self.metrics_history
 
     def inject_lazy_clients(self, node_ids: Set[int]) -> None:
