@@ -824,6 +824,15 @@ class ChainFSLProtocol:
         updates = []
         proofs = []
         train_losses: Dict[int, float] = {}
+        
+        # Prevent OpenMP thread explosion (CPU Thrashing) when using ThreadPoolExecutor
+        original_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        
+        # Concurrency on GPU often causes OOM or CUDA context deadlock with 16 threads
+        is_cuda = self.device.type == "cuda"
+        # Run sequentially on CUDA to avoid OOM/deadlock, or safe parallelism on CPU
+        workers = 1 if is_cuda else min(self.n_nodes, 16)
 
         def train_node(node: HardwareProfile) -> Optional[tuple]:
             try:
@@ -923,17 +932,22 @@ class ChainFSLProtocol:
                     progress.last_loss = avg_loss
                     progress.cumulative_loss += avg_loss
 
+                import sys
+                sys.stdout.flush()
+
                 return update, proof
 
             except Exception as e:
                 # Crash-proofing: log error, mark node as excluded
                 print(f"WARNING: Node {node.node_id} training failed: {e}")
+                import sys
+                sys.stdout.flush()
                 progress = self.node_progress.get(node.node_id)
                 if progress:
                     progress.times_excluded += 1
                 return None
 
-        with ThreadPoolExecutor(max_workers=min(self.n_nodes, 16)) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(train_node, node): node
                 for node in self.nodes
@@ -944,6 +958,9 @@ class ChainFSLProtocol:
                     update, proof = result
                     updates.append(update)
                     proofs.append(proof)
+
+        # Restore OpenMP threads
+        torch.set_num_threads(original_threads)
 
         # Update staleness
         updated_ids = {u["node_id"] for u in updates}
