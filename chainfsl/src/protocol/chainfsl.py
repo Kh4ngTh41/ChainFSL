@@ -912,14 +912,7 @@ class ChainFSLProtocol:
 
                 # Broadcast LRH to gossip network (P0 fix: gossip was never broadcast)
                 comp_load = (cut_layer / 4.0) * (batch_size / 32.0)
-                self.gossip.broadcast(node.node_id, {
-                    "flops_ratio": node.flops_ratio,
-                    "ram_mb": node.ram_mb,
-                    "bandwidth_mbps": node.bandwidth_mbps,
-                    "reputation": node.reputation,
-                    "load": comp_load,
-                    "round": self.current_round,
-                })
+                self.gossip.broadcast_lrh(node.node_id, profile=node, current_load=comp_load)
 
                 # Update node progress tracking
                 progress = self.node_progress.get(node.node_id)
