@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=mps:2
-#SBATCH --mem=16G
+#SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
 #SBATCH --error=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.err

@@ -82,14 +82,20 @@ def simple_pretrain(
     with tqdm(total=pretrain_rounds, desc="PPO Training", unit="round") as pbar:
         for round_i in range(pretrain_rounds):
             obs = orchestrator.env.reset()
+            if isinstance(obs, tuple):
+                obs = obs[0]  # Gym API returns (obs, info)
             done = False
 
             # Run a few steps per round
             for _ in range(5):
                 action, _ = orchestrator.model.predict(obs, deterministic=False)
                 obs, reward, done, _, info = orchestrator.env.step(action)
+                if isinstance(obs, tuple):
+                    obs = obs[0]
                 if done:
                     obs = orchestrator.env.reset()
+                    if isinstance(obs, tuple):
+                        obs = obs[0]
                     break
 
             # Update PPO
