@@ -2,7 +2,7 @@
 """
 Lightweight PPO Pretrain for ChainFSL HASO.
 
-Trains PPO agent directly WITHOUT full protocol overhead.
+Trains PPO agent directly WITH GPU acceleration.
 Fast pretraining for HASO decision policy.
 
 Usage:
@@ -19,8 +19,11 @@ _PROJECT_ROOT = Path(__file__).parent
 import sys
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+import torch
+from tqdm import tqdm
+
 from src.haso.orchestrator import HASOOrchestrator
-from src.emulator.node_profile import generate_hardware_profiles
+from src.emulator.tier_factory import create_nodes, TierDistribution
 
 
 def simple_pretrain(
@@ -30,7 +33,7 @@ def simple_pretrain(
     save_dir: str = "pretrainppo",
 ) -> dict:
     """
-    Lightweight PPO pretrain - trains and saves directly.
+    Lightweight PPO pretrain with GPU acceleration.
 
     Args:
         n_nodes: Number of nodes.
@@ -41,10 +44,22 @@ def simple_pretrain(
     Returns:
         Dict with pretrain stats.
     """
-    print(f"[Pretrain] Lightweight mode: {pretrain_rounds} rounds, {n_nodes} nodes")
+    # Device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n{'='*60}")
+    print(f"PPO PRETRAIN SUMMARY")
+    print(f"{'='*60}")
+    print(f"  Device:       {device}")
+    print(f"  Nodes (a):    {n_nodes}")
+    print(f"  Models:       1 PPO orchestrator (centralized)")
+    print(f"  Community:    1 model in federation")
+    print(f"  Rounds:       {pretrain_rounds}")
+    print(f"  Cluster:      k=1 (centralized HASO)")
+    print(f"{'='*60}\n")
 
     # Generate node profiles
-    profiles = generate_hardware_profiles(n_nodes, seed=seed)
+    tier_dist = TierDistribution(tiers=[1, 2, 3, 4], probabilities=[0.1, 0.3, 0.4, 0.2])
+    profiles = create_nodes(n_nodes, distribution=tier_dist)
 
     # Create orchestrator with PPO
     orchestrator = HASOOrchestrator(
@@ -55,48 +70,46 @@ def simple_pretrain(
         n_steps=128,
         batch_size=64,
         n_epochs=5,
-        verbose=1,
+        verbose=0,  # Quiet - tqdm will show progress
     )
 
     save_path = Path(save_dir) / str(pretrain_rounds) / "orchestrator.zip"
 
-    print(f"[Pretrain] Training PPO for {pretrain_rounds} rounds...")
+    print(f"[Pretrain] Training PPO for {pretrain_rounds} rounds on {device}...")
     start_time = time.perf_counter()
 
-    # Train PPO directly using env
-    # Each round: reset env, run a few steps, then learn
-    for round_i in range(pretrain_rounds):
-        obs = orchestrator.env.reset()
-        done = False
-        total_reward = 0
+    # Train PPO with tqdm progress bar
+    with tqdm(total=pretrain_rounds, desc="PPO Training", unit="round") as pbar:
+        for round_i in range(pretrain_rounds):
+            obs = orchestrator.env.reset()
+            done = False
 
-        # Run a few steps per round (3-5 steps is enough for PPO)
-        for _ in range(5):
-            action, _ = orchestrator.model.predict(obs, deterministic=False)
-            obs, reward, done, _, info = orchestrator.env.step(action)
-            total_reward += reward
-            if done:
-                obs = orchestrator.env.reset()
-                break
+            # Run a few steps per round
+            for _ in range(5):
+                action, _ = orchestrator.model.predict(obs, deterministic=False)
+                obs, reward, done, _, info = orchestrator.env.step(action)
+                if done:
+                    obs = orchestrator.env.reset()
+                    break
 
-        # Update PPO after each round
-        orchestrator.model.learn(
-            total_timesteps=128,
-            reset_num_timesteps=False,
-            progress_bar=False,
-        )
+            # Update PPO
+            orchestrator.model.learn(
+                total_timesteps=128,
+                reset_num_timesteps=False,
+                progress_bar=False,
+            )
 
-        if (round_i + 1) % 20 == 0:
-            elapsed = time.perf_counter() - start_time
-            print(f"  Round {round_i+1}/{pretrain_rounds} - elapsed: {elapsed:.1f}s")
+            pbar.update(1)
+            pbar.set_postfix({
+                "loss": f"{orchestrator.env._mean_loss:.3f}",
+                "fair": f"{orchestrator.env._fairness:.3f}",
+            })
 
     elapsed = time.perf_counter() - start_time
-    print(f"[Pretrain] Training complete in {elapsed:.1f}s")
+    print(f"\n[Pretrain] Training complete in {elapsed:.1f}s")
 
-    # Ensure save directory exists
+    # Save
     save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Save trained model
     orchestrator.save(str(save_path))
     print(f"[Pretrain] Saved to {save_path}")
 
@@ -106,6 +119,7 @@ def simple_pretrain(
         "n_nodes": n_nodes,
         "seed": seed,
         "elapsed_seconds": elapsed,
+        "device": str(device),
         "timestamp": datetime.now().isoformat(),
     }
     with open(save_path.parent / "pretrain_metrics.json", "w") as f:
@@ -117,6 +131,7 @@ def simple_pretrain(
         "pretrain_rounds": pretrain_rounds,
         "n_nodes": n_nodes,
         "seed": seed,
+        "device": str(device),
     }
 
 
@@ -136,10 +151,15 @@ def main():
         save_dir=args.save_dir,
     )
 
-    print(f"\n[PRETRAIN COMPLETE]")
-    print(f"  Rounds: {result['pretrain_rounds']}")
-    print(f"  Time: {result['elapsed_seconds']:.1f}s")
-    print(f"  Saved to: {args.save_dir}/{args.rounds}/orchestrator.zip")
+    print(f"\n{'='*60}")
+    print(f"PRETRAIN COMPLETE")
+    print(f"{'='*60}")
+    print(f"  Rounds:    {result['pretrain_rounds']}")
+    print(f"  Nodes:     {result['n_nodes']}")
+    print(f"  Time:      {result['elapsed_seconds']:.1f}s")
+    print(f"  Device:    {result['device']}")
+    print(f"  Saved:     pretrainppo/{args.rounds}/orchestrator.zip")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
