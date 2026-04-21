@@ -293,6 +293,7 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
         HASOOrchestrator instance, or None if not found.
     """
     from src.haso.orchestrator import HASOOrchestrator
+    from src.emulator.tier_factory import create_nodes, TierDistribution
 
     # Try extracted directory first
     extracted_path = Path(base_dir) / str(rounds) / "orchestrator.zip"
@@ -314,8 +315,11 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
         print(f"[LOAD] No pretrained model found for {rounds} rounds")
         return None
 
+    # Create proper node profiles for n_nodes
+    tier_dist = TierDistribution(tiers=[1, 2, 3, 4], probabilities=[0.1, 0.3, 0.4, 0.2])
+    node_profiles = create_nodes(n_nodes, distribution=tier_dist)
+
     # Create orchestrator and load
-    node_profiles = []  # Will be set by caller
     orchestrator = create_orchestrator(n_nodes, node_profiles, config)
     orchestrator.load(str(orchestrator_path))
 
