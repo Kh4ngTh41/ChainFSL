@@ -326,7 +326,8 @@ class ChainFSLProtocol:
         )
 
         # --- Blockchain ---
-        self.ledger = BlockchainLedger(db_path=db_path)
+        self.blockchain_enabled = config.get("blockchain_enabled", True)
+        self.ledger = BlockchainLedger(db_path=db_path) if self.blockchain_enabled else None
 
         # --- Aggregator ---
         self.global_state: Dict[str, torch.Tensor] = {
@@ -353,6 +354,8 @@ class ChainFSLProtocol:
 
         # --- Tracking ---
         self.metrics_history: List[RoundMetrics] = []
+        self._last_eval_acc: float = 0.0
+        self._last_eval_loss: float = 0.0
         self.node_progress: Dict[int, NodeProgress] = {
             n.node_id: NodeProgress(node_id=n.node_id) for n in self.nodes
         }
@@ -410,7 +413,7 @@ class ChainFSLProtocol:
                         haso_decisions.append(f"N{nid}:L{cfg['cut_layer']}->T{cfg['target_compute_node']}")
                     else:
                         haso_decisions.append(f"N{nid}:EXCLUDED")
-                pbar.write(f"  Round {t} HASO: {' | '.join(haso_decisions[:5])}{'...' if len(haso_decisions)>5 else ''}")
+                pbar.write(f"  Round {t} HASO: {' | '.join(haso_decisions)}")
 
             # Phase 2-3: SFL training + TVE proof generation
             train_start = time.perf_counter()
@@ -429,7 +432,7 @@ class ChainFSLProtocol:
                     target = cfg.get('target_compute_node', '?')
                     train_details.append(f"N{nid}(L{cut}->T{target}):{loss:.3f}")
             if train_details:
-                pbar.write(f"  Round {t} Train: {' | '.join(train_details[:5])}{'...' if len(train_details)>5 else ''}")
+                pbar.write(f"  Round {t} Train: {' | '.join(train_details)}")
 
             # Phase 4: TVE verification
             verif_start = time.perf_counter()
@@ -484,6 +487,9 @@ class ChainFSLProtocol:
                 eval_result = self._evaluate()
                 test_acc = eval_result.get("accuracy", 0.0) if isinstance(eval_result, dict) else eval_result
                 metrics.test_acc = test_acc
+                self._last_eval_acc = float(test_acc)
+                if isinstance(eval_result, dict):
+                    self._last_eval_loss = float(eval_result.get("loss", 0.0))
                 self._log_round(t, metrics)
                 pbar.write(f"  [Round {t}] EVAL: acc={test_acc:.2f}%, loss={metrics.train_loss:.3f}, valid={len(valid_updates)}/{len(updates)}")
 
@@ -623,8 +629,27 @@ class ChainFSLProtocol:
         # Enforce memory constraints and build configs
         memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
 
-        for node, decision in zip(self.nodes, decisions):
+        if len(decisions) != len(self.nodes):
+            self.logger.warning(
+                "Centralized HASO decision count mismatch: got %d decisions for %d nodes. "
+                "Falling back to safe defaults for missing nodes.",
+                len(decisions),
+                len(self.nodes),
+            )
+
+        for idx, node in enumerate(self.nodes):
             node_id = node.node_id
+
+            if idx < len(decisions):
+                decision = decisions[idx]
+            else:
+                # Safe fallback when pretrained policy shape does not match n_nodes.
+                decision = {
+                    "cut_layer": 1,
+                    "batch_size": self.cfg.get("batch_size_default", 32),
+                    "H": 1,
+                    "target_compute_node": node_id,
+                }
 
             # Find deepest valid cut layer
             valid_cut = self._find_deepest_valid_cut_layer(node, memory_map)
@@ -834,6 +859,21 @@ class ChainFSLProtocol:
         # Run sequentially on CUDA to avoid OOM/deadlock, or safe parallelism on CPU
         workers = 1 if is_cuda else min(self.n_nodes, 16)
 
+        # Calculate total training steps for the node progress bar
+        total_steps = 0
+        for node in self.nodes:
+            cfg = configs.get(node.node_id)
+            if cfg is not None:
+                if node.can_fit_cut_layer(cfg.get("cut_layer", 2), SplittableResNet18.MEMORY_WITH_ADAM_MB):
+                    total_steps += len(self.train_loaders[node.node_id]) * cfg.get("H", 1)
+
+        node_pbar = tqdm(total=total_steps, desc=f"  Round {self.current_round} Node Training", leave=False, unit="batch")
+        pbar_lock = threading.Lock()
+
+        def step_callback():
+            with pbar_lock:
+                node_pbar.update(1)
+
         def train_node(node: HardwareProfile) -> Optional[tuple]:
             try:
                 cfg = configs.get(node.node_id)
@@ -853,10 +893,12 @@ class ChainFSLProtocol:
                     return None  # Skip this node — cannot train safely
 
                 # Create trainer for this node
+                label_smoothing = float(self.cfg.get("label_smoothing", 0.1))
                 trainer = SFLTrainer(
                     node_id=node.node_id,
                     model=self.model,
                     cut_layer=cut_layer,
+                    criterion=torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing),
                     device=self.device,
                 )
                 self.trainers[node.node_id] = trainer
@@ -866,7 +908,7 @@ class ChainFSLProtocol:
 
                 # Run H local epochs
                 loader = self.train_loaders[node.node_id]
-                avg_loss, _ = trainer.local_epochs(loader, H=H, verbose=False)
+                avg_loss, _ = trainer.local_epochs(loader, H=H, verbose=False, step_callback=step_callback)
 
                 # Client/server state for aggregation
                 client_state = trainer.get_client_state()
@@ -954,6 +996,9 @@ class ChainFSLProtocol:
 
         # Restore OpenMP threads
         torch.set_num_threads(original_threads)
+        
+        # Close progress bar
+        node_pbar.close()
 
         # Update staleness
         updated_ids = {u["node_id"] for u in updates}
@@ -1128,6 +1173,9 @@ class ChainFSLProtocol:
         shapley_vals: Dict[int, float],
     ) -> None:
         """Phase 7: Record rewards and verifications to blockchain ledger."""
+        if not self.blockchain_enabled or self.ledger is None:
+            return
+
         epoch = self.current_round
 
         # Record rewards
@@ -1221,7 +1269,8 @@ class ChainFSLProtocol:
             if (isinstance(r, dict) and r.get("is_valid", True))
             or (hasattr(r, "is_valid") and r.is_valid)
         )
-        detection_rate = n_valid / max(len(verif_results), 1)
+        n_total_verif = len(verif_results)
+        detection_rate = (n_total_verif - n_valid) / max(n_total_verif, 1)
 
         # Fairness (Jain's index)
         reward_values = [max(0.0, r) for r in rewards.values()]
@@ -1241,13 +1290,13 @@ class ChainFSLProtocol:
         mean_verif_ms = float(np.mean(verif_times)) if verif_times else 0.0
 
         # Ledger size
-        ledger_kb = self.ledger.ledger_size_bytes() / 1024.0
+        ledger_kb = self.ledger.ledger_size_bytes() / 1024.0 if self.ledger is not None else 0.0
 
         return RoundMetrics(
             round=t,
             round_latency=latency,
             train_loss=avg_loss,
-            test_acc=0.0,  # filled after evaluation
+            test_acc=self._last_eval_acc,
             n_valid_updates=n_valid,
             n_participants=n_participants,
             attack_detection_rate=detection_rate,

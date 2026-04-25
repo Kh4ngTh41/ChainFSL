@@ -9,6 +9,7 @@ n_classes: 10
 global_rounds: 100
 local_rounds_max: 5   # H_max
 batch_size_default: 32
+label_smoothing: 0.1  # Cross-entropy smoothing for better generalization
 dirichlet_alpha: 0.5  # Non-IID degree
 
 # HASO

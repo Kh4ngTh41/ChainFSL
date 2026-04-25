@@ -71,6 +71,7 @@ def build_config(
         "n_classes": 10,
         "global_rounds": global_rounds,
         "batch_size_default": 32,
+        "label_smoothing": 0.1,
         "dirichlet_alpha": dirichlet_alpha,
         "local_epochs": 1,
         "sample_fraction": 1.0,
@@ -188,6 +189,13 @@ def summary_stats(metrics: List[Dict[str, Any]]) -> Dict[str, float]:
             result[f"{key}_min"] = float(np.min(arr))
             result[f"{key}_max"] = float(np.max(arr))
 
+    # Explicit final metric snapshots for downstream consumers.
+    for key in numeric_keys:
+        try:
+            result[f"final_{key}"] = float(metrics[-1][key])
+        except (ValueError, TypeError, KeyError):
+            continue
+
     return result
 
 
@@ -203,8 +211,13 @@ def print_summary(exp_name: str, metrics: List[Dict[str, Any]]) -> None:
     print(f"{'=' * 60}")
 
     # Key metrics
+    try:
+        final_test_acc = float(metrics[-1].get("test_acc", 0.0))
+        print(f"  Final Test Acc: {final_test_acc:.2f}%")
+    except (ValueError, TypeError, KeyError, IndexError):
+        pass
     if "test_acc_mean" in stats:
-        print(f"  Test Accuracy: {stats['test_acc_mean']:.2f}% ± {stats['test_acc_std']:.2f}%")
+        print(f"  Mean Test Acc:  {stats['test_acc_mean']:.2f}% ± {stats['test_acc_std']:.2f}%")
     if "train_loss_mean" in stats:
         print(f"  Train Loss:    {stats['train_loss_mean']:.4f} ± {stats['train_loss_std']:.4f}")
     if "round_latency_mean" in stats:

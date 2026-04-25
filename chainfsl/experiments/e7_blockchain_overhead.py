@@ -48,7 +48,7 @@ def run(
 
     # --- Method 1: Full ChainFSL with blockchain ---
     print("\n--- ChainFSL with Blockchain ---")
-    full_cfg = {**config, "global_rounds": 30}
+    full_cfg = {**config, "global_rounds": 30, "blockchain_enabled": True}
 
     protocol = ChainFSLProtocol(
         config=full_cfg,
@@ -81,7 +81,12 @@ def run(
 
     # --- Method 2: ChainFSL without blockchain ---
     print("\n--- ChainFSL without Blockchain (GTM only) ---")
-    no_bc_cfg = {**config, "global_rounds": 30, "gtm_enabled": True}
+    no_bc_cfg = {
+        **config,
+        "global_rounds": 30,
+        "gtm_enabled": True,
+        "blockchain_enabled": False,
+    }
 
     protocol_nobc = ChainFSLProtocol(
         config=no_bc_cfg,

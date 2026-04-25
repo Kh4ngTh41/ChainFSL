@@ -125,20 +125,22 @@ def _estimate_false_positive_rate(
     if not metrics:
         return 0.0
 
-    # In the protocol, honest nodes should have is_valid=True
-    # This is a simplified estimation
+    # Aggregate approximation from last round counts.
+    # FP ~= max(0, invalid_updates - attacked_updates) / honest_participants
     last_metric = metrics[-1]
-    n_valid = last_metric.get("n_valid_updates", 0)
-    n_participants = last_metric.get("n_participants", total_nodes)
+    try:
+        n_valid = int(last_metric.get("n_valid_updates", 0))
+        n_participants = int(last_metric.get("n_participants", total_nodes))
+    except (ValueError, TypeError):
+        return 0.0
 
     honest_participated = n_participants - len(attack_ids)
     if honest_participated <= 0:
         return 0.0
 
-    # False positives = honest nodes flagged
-    # Since we don't have per-node validation data here, use detection rate proxy
-    honest_valid_rate = n_valid / max(n_participants, 1)
-    return max(0.0, 1.0 - honest_valid_rate)
+    n_invalid = max(0, n_participants - n_valid)
+    estimated_fp = max(0, n_invalid - len(attack_ids))
+    return min(1.0, estimated_fp / max(honest_participated, 1))
 
 
 def _print_security_table(results: Dict[str, Any]) -> None:

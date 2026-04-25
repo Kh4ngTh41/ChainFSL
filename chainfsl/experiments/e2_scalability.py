@@ -56,10 +56,17 @@ def run(
             db_path=f"/tmp/chainfsl_e2_n{n_nodes}.db",
         )
 
-        # Attach pretrained orchestrator if available
+        # Attach pretrained orchestrator only when action space matches n_nodes
         if pretrained_orchestrator is not None:
-            print(f"  [E2:n={n_nodes}] Using pretrained orchestrator")
-            protocol._orchestrator = pretrained_orchestrator
+            pretrained_nodes = getattr(pretrained_orchestrator, "n_nodes", None)
+            if pretrained_nodes == n_nodes:
+                print(f"  [E2:n={n_nodes}] Using pretrained orchestrator")
+                protocol._orchestrator = pretrained_orchestrator
+            else:
+                print(
+                    f"  [E2:n={n_nodes}] Skip pretrained orchestrator "
+                    f"(trained for n_nodes={pretrained_nodes})"
+                )
 
         metrics = protocol.run(total_rounds=cfg["global_rounds"], eval_every=10)
         metrics_dicts = [m.to_dict() for m in metrics]

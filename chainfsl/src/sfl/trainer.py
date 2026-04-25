@@ -131,6 +131,7 @@ class SFLTrainer:
         dataloader,
         H: int,
         verbose: bool = False,
+        step_callback = None,
     ) -> Tuple[float, float]:
         """
         Run H local epochs on a dataloader.
@@ -139,6 +140,7 @@ class SFLTrainer:
             dataloader: DataLoader for this node.
             H: Number of local epochs.
             verbose: Print progress.
+            step_callback: Optional callable to invoke after each batch.
 
         Returns:
             (avg_loss, total_time) tuple.
@@ -155,6 +157,8 @@ class SFLTrainer:
                 epoch_loss += result.loss
                 steps += 1
                 total_steps += 1
+                if step_callback:
+                    step_callback()
 
             avg_epoch_loss = epoch_loss / max(steps, 1)
             total_loss += epoch_loss

@@ -80,19 +80,20 @@ def run(
     save_results_csv("e1_chainfsl", metrics_chainfsl, config["log_dir"])
     print_summary("chainfsl", metrics_chainfsl)
 
+    # --- Method 2: ChainFSL-NoHASO (required core comparison) ---
+    print("\n--- ChainFSL-NoHASO ---")
+    no_haso_cfg = {
+        **config,
+        "haso_enabled": False,
+        "tve_enabled": True,
+        "gtm_enabled": True,
+    }
+    metrics_nohaso = _run_chainfsl(no_haso_cfg)
+    results["chainfsl_nohaso"] = metrics_nohaso
+    save_results_csv("e1_chainfsl_nohaso", metrics_nohaso, config["log_dir"])
+    print_summary("chainfsl_nohaso", metrics_nohaso)
+
     if not skip_baselines:
-        # --- Method 2: ChainFSL-NoHASO (ablation: HASO disabled) ---
-        print("\n--- ChainFSL-NoHASO ---")
-        no_haso_cfg = {
-            **config,
-            "haso_enabled": False,
-            "tve_enabled": True,
-            "gtm_enabled": True,
-        }
-        metrics_nohaso = _run_chainfsl(no_haso_cfg)
-        results["chainfsl_nohaso"] = metrics_nohaso
-        save_results_csv("e1_chainfsl_nohaso", metrics_nohaso, config["log_dir"])
-        print_summary("chainfsl_nohaso", metrics_nohaso)
 
         # --- Method 3: SplitFed baseline ---
         print("\n--- SplitFed (uniform cut=2) ---")
