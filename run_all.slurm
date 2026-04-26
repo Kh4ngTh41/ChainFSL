@@ -23,7 +23,7 @@ GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
 PRETRAIN_ROUNDS=50
 OFFLINE_HASO=1
-PPO_DEVICE=cuda
+PPO_DEVICE=cpu
 REQUIRE_CUDA=1
 SETUP_ONCE=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
@@ -32,10 +32,10 @@ PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
 
 if [ "$OFFLINE_HASO" -eq 1 ]; then
     OFFLINE_ARG="--offline_haso"
-    echo "HASO mode: OFFLINE (pretrained PPO inference only)"
+    echo "HASO mode: OFFLINE (pretrained PPO inference only, PPO_DEVICE=$PPO_DEVICE)"
 else
     OFFLINE_ARG=""
-    echo "HASO mode: ONLINE (PPO updates during experiment)"
+    echo "HASO mode: ONLINE (PPO updates during experiment, PPO_DEVICE=$PPO_DEVICE)"
 fi
 
 module load python312

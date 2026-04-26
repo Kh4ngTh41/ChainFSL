@@ -297,6 +297,8 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
     from src.haso.orchestrator import HASOOrchestrator
     from src.emulator.tier_factory import create_nodes, TierDistribution
 
+    print(f"[LOAD] Preparing to load orchestrator (rounds={rounds}, n_nodes={n_nodes})", flush=True)
+
     # Try extracted directory first
     extracted_path = Path(base_dir) / str(rounds) / "orchestrator.zip"
 
@@ -318,14 +320,17 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
         return None
 
     # Create proper node profiles for n_nodes
+    print("[LOAD] Creating node profiles...", flush=True)
     tier_dist = TierDistribution(tiers=[1, 2, 3, 4], probabilities=[0.1, 0.3, 0.4, 0.2])
     node_profiles = create_nodes(n_nodes, distribution=tier_dist)
 
     # Create orchestrator and load
+    print(f"[LOAD] Creating orchestrator with ppo_device={config.get('ppo_device', 'auto')}...", flush=True)
     orchestrator = create_orchestrator(n_nodes, node_profiles, config)
+    print("[LOAD] Loading PPO weights into orchestrator...", flush=True)
     orchestrator.load(str(orchestrator_path))
 
-    print(f"[LOAD] Successfully loaded orchestrator from {orchestrator_path}")
+    print(f"[LOAD] Successfully loaded orchestrator from {orchestrator_path}", flush=True)
     return orchestrator
 
 
