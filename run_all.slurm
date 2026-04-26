@@ -10,6 +10,8 @@
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
 #SBATCH --error=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.err
 
+set -euo pipefail
+
 # =========================================================
 # FULL EXPERIMENT SUITE - All 7 experiments
 # Hierarchical HASO: k clusters, a=5 nodes/cluster
@@ -55,18 +57,31 @@ else
 fi
 echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
-python - << 'PY'
+echo "[STEP] GPU visibility check..."
+nvidia-smi -L || true
+
+echo "[STEP] Torch CUDA quick check (timeout 120s)..."
+if ! timeout 120s python -u - << 'PY'
 import torch
 print(f"[CUDA CHECK] torch={torch.__version__} cuda_available={torch.cuda.is_available()} device_count={torch.cuda.device_count()}")
 PY
+then
+    echo "[FATAL] Torch CUDA quick check timed out or failed."
+    exit 2
+fi
 
 if [ "$REQUIRE_CUDA" -eq 1 ]; then
-    python - << 'PY'
+    echo "[STEP] Enforcing CUDA requirement..."
+    if ! timeout 60s python -u - << 'PY'
 import torch, sys
 if not torch.cuda.is_available():
         print("[FATAL] CUDA not available after environment setup. Abort to avoid slow CPU fallback.")
         sys.exit(2)
 PY
+    then
+        echo "[FATAL] CUDA enforcement check timed out or failed."
+        exit 2
+    fi
 fi
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
