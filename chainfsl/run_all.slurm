@@ -37,20 +37,27 @@ fi
 
 module load python312
 
-pip3 install -r $REQ_FILE
+if [ ! -d "$VENV_DIR" ]; then
+    python3 -m venv "$VENV_DIR"
+fi
+source "$VENV_DIR/bin/activate"
+export PYTHONNOUSERSITE=1
+
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r $REQ_FILE
 # Force a driver-compatible PyTorch build (CUDA 12.1) to avoid cuda init fallback.
-pip3 install --user --upgrade --force-reinstall \
+python -m pip install --upgrade --force-reinstall \
     --index-url https://download.pytorch.org/whl/cu121 \
     torch==2.5.1 torchvision==0.20.1
 echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
-python3 - << 'PY'
+python - << 'PY'
 import torch
 print(f"[CUDA CHECK] torch={torch.__version__} cuda_available={torch.cuda.is_available()} device_count={torch.cuda.device_count()}")
 PY
 
 if [ "$REQUIRE_CUDA" -eq 1 ]; then
-    python3 - << 'PY'
+    python - << 'PY'
 import torch, sys
 if not torch.cuda.is_available():
         print("[FATAL] CUDA not available after environment setup. Abort to avoid slow CPU fallback.")
@@ -68,7 +75,7 @@ echo "PPO Pretrain Check"
 echo "=========================================="
 if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
     echo "No pretrained model found. Training PPO offline for $PRETRAIN_ROUNDS rounds..."
-    python3 pretrain_pipeline.py \
+    python pretrain_pipeline.py \
         --rounds $PRETRAIN_ROUNDS \
         --n_nodes $N_NODES \
         --seed 42 \
