@@ -19,7 +19,7 @@ REQUIRED_VRAM=30000
 N_NODES=20
 GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
-PRETRAIN_ROUNDS=500
+PRETRAIN_ROUNDS=50
 OFFLINE_HASO=1
 PPO_DEVICE=cuda
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
@@ -48,7 +48,7 @@ echo "=========================================="
 echo "PPO Pretrain Check"
 echo "=========================================="
 if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
-    echo "No pretrained model found. Training PPO (lightweight) for $PRETRAIN_ROUNDS rounds..."
+    echo "No pretrained model found. Training PPO offline for $PRETRAIN_ROUNDS rounds..."
     python3 pretrain_pipeline.py \
         --rounds $PRETRAIN_ROUNDS \
         --n_nodes $N_NODES \
