@@ -23,6 +23,7 @@ PRETRAIN_ROUNDS=50
 OFFLINE_HASO=1
 PPO_DEVICE=cuda
 REQUIRE_CUDA=1
+SETUP_ONCE=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
@@ -36,6 +37,7 @@ else
 fi
 
 module load python312
+echo "[SLURM SCRIPT] chainfsl run_all v2026-04-26-setup-once"
 
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
@@ -43,12 +45,14 @@ fi
 source "$VENV_DIR/bin/activate"
 export PYTHONNOUSERSITE=1
 
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r $REQ_FILE
-# Force a driver-compatible PyTorch build (CUDA 12.1) to avoid cuda init fallback.
-python -m pip install --upgrade --force-reinstall \
-    --index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.5.1 torchvision==0.20.1
+if [ "$SETUP_ONCE" -eq 1 ] && [ -f "$VENV_DIR/.chainfsl_env_ready" ]; then
+    echo "[ENV] Reusing existing .venv dependencies (setup-once marker found)."
+else
+    echo "[ENV] Installing/updating dependencies in .venv..."
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install -r $REQ_FILE
+    touch "$VENV_DIR/.chainfsl_env_ready"
+fi
 echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
 python - << 'PY'
