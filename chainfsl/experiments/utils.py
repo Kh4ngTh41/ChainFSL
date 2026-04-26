@@ -85,6 +85,10 @@ def build_config(
         "reward_alpha": 1.0,
         "reward_beta": 0.5,
         "reward_gamma": 0.1,
+        "reward_latency_penalty_weight": 0.0,
+        "reward_penalty_source": "train_time",  # train_time | round_latency
+        "straggler_fraction": 0.0,
+        "straggler_slowdown_factor": 3,
         "ema_beta": 0.9,
         "tve_enabled": tve_enabled,
         "committee_size": max(3, n_nodes // 10),

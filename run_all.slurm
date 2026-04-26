@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
@@ -22,6 +22,7 @@ CLUSTER_SIZE=5
 PRETRAIN_ROUNDS=50
 OFFLINE_HASO=1
 PPO_DEVICE=cuda
+REQUIRE_CUDA=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
@@ -37,7 +38,25 @@ fi
 module load python312
 
 pip3 install -r $REQ_FILE
-echo "Requested multiple GPUs via SLURM allocation. PPO will use a CUDA device if available."
+# Force a driver-compatible PyTorch build (CUDA 12.1) to avoid cuda init fallback.
+pip3 install --user --upgrade --force-reinstall \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.5.1 torchvision==0.20.1
+echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
+
+python3 - << 'PY'
+import torch
+print(f"[CUDA CHECK] torch={torch.__version__} cuda_available={torch.cuda.is_available()} device_count={torch.cuda.device_count()}")
+PY
+
+if [ "$REQUIRE_CUDA" -eq 1 ]; then
+    python3 - << 'PY'
+import torch, sys
+if not torch.cuda.is_available():
+        print("[FATAL] CUDA not available after environment setup. Abort to avoid slow CPU fallback.")
+        sys.exit(2)
+PY
+fi
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 

@@ -71,7 +71,15 @@ def run(
 
     # --- Method 1: ChainFSL (full HASO) ---
     print("\n--- ChainFSL (HASO enabled) ---")
-    chainfsl_cfg = {**config, "haso_enabled": True, "tve_enabled": True, "gtm_enabled": True}
+    chainfsl_cfg = {
+        **config,
+        "haso_enabled": True,
+        "tve_enabled": True,
+        "gtm_enabled": True,
+        # Direct time penalty helps HASO optimize for speed, not just utility.
+        "reward_latency_penalty_weight": config.get("reward_latency_penalty_weight", 0.001),
+        "reward_penalty_source": config.get("reward_penalty_source", "train_time"),
+    }
     metrics_chainfsl = _run_chainfsl(
         chainfsl_cfg,
         pretrained_orchestrator=pretrained_orchestrator,
@@ -87,6 +95,9 @@ def run(
         "haso_enabled": False,
         "tve_enabled": True,
         "gtm_enabled": True,
+        # Explicit straggler scenario for No-HASO baseline.
+        "straggler_fraction": config.get("nohaso_straggler_fraction", 0.3),
+        "straggler_slowdown_factor": config.get("nohaso_straggler_slowdown_factor", 3),
     }
     metrics_nohaso = _run_chainfsl(no_haso_cfg)
     results["chainfsl_nohaso"] = metrics_nohaso

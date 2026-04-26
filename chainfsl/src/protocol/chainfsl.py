@@ -203,6 +203,9 @@ class ChainFSLProtocol:
         self.nodes = nodes or create_nodes(config["n_nodes"], distribution=tier_dist)
         self.n_nodes = len(self.nodes)
         self.haso_online_update = config.get("haso_online_update", True)
+        self.reward_latency_penalty_weight = float(config.get("reward_latency_penalty_weight", 0.0))
+        self.reward_penalty_source = str(config.get("reward_penalty_source", "train_time"))
+        self._prev_round_latency = 0.0
 
         # --- Global model ---
         self.model = SplittableResNet18(
@@ -356,6 +359,9 @@ class ChainFSLProtocol:
         n_lazy = int(config.get("lazy_client_fraction", 0.0) * self.n_nodes)
         self.lazy_node_ids: Set[int] = set(n.node_id for n in list(self.nodes)[:n_lazy])
         self.sybil_node_ids: Set[int] = set()
+        n_strag = int(config.get("straggler_fraction", 0.0) * self.n_nodes)
+        self.straggler_node_ids: Set[int] = set(n.node_id for n in list(self.nodes)[:n_strag])
+        self.straggler_slowdown_factor = max(1, int(config.get("straggler_slowdown_factor", 3)))
 
         # --- Tracking ---
         self.metrics_history: List[RoundMetrics] = []
@@ -452,6 +458,7 @@ class ChainFSLProtocol:
             # Phase 6: GTM rewards (includes Shapley)
             shapley_start = time.perf_counter()
             shapley_vals, rewards = self._phase_gtm(updates, verif_results)
+            rewards = self._apply_latency_penalty(rewards, train_elapsed)
             shapley_elapsed = time.perf_counter() - shapley_start
 
             # Phase 7: Blockchain commit
@@ -465,6 +472,7 @@ class ChainFSLProtocol:
             # Total elapsed
             elapsed = time.perf_counter() - round_start
             train_only_elapsed = max(0.0, elapsed - ppo_elapsed)
+            self._prev_round_latency = elapsed
 
             # Compute comm overhead estimate (smashed data * n_nodes in GB)
             comm_estimate = sum(u.get("smashed_bytes", 0) for u in updates) / 1e9
@@ -552,10 +560,13 @@ class ChainFSLProtocol:
         if not self.haso_enabled:
             # Ablation: fixed uniform cut layer 2
             for node in self.nodes:
+                H_val = 1
+                if node.node_id in self.straggler_node_ids:
+                    H_val = self.straggler_slowdown_factor
                 configs[node.node_id] = {
                     "cut_layer": 2,
                     "batch_size": self.cfg.get("batch_size_default", 32),
-                    "H": 1,
+                    "H": H_val,
                     "target_compute_node": 0,
                 }
             return configs
@@ -617,6 +628,27 @@ class ChainFSLProtocol:
             }
 
         return configs
+
+    def _apply_latency_penalty(
+        self,
+        rewards: Dict[int, float],
+        train_time: float,
+    ) -> Dict[int, float]:
+        """Apply direct latency penalty to HASO rewards."""
+        if (not self.haso_enabled) or self.reward_latency_penalty_weight <= 0.0 or not rewards:
+            return rewards
+
+        source = self.reward_penalty_source.lower()
+        if source == "round_latency":
+            penalty_signal = float(self._prev_round_latency)
+        else:
+            penalty_signal = float(train_time)
+
+        penalty = self.reward_latency_penalty_weight * max(0.0, penalty_signal)
+        if penalty <= 0.0:
+            return rewards
+
+        return {node_id: reward - penalty for node_id, reward in rewards.items()}
 
     def _phase_haso_centralized(self) -> Dict[int, Optional[Dict[str, Any]]]:
         """
