@@ -181,7 +181,10 @@ def _print_comparison_table(results: Dict[str, Any], target_acc: float) -> None:
     print("\n" + "=" * 70)
     print("E1 COMPARISON TABLE")
     print("=" * 70)
-    print(f"{'Method':<20} {'Final Acc':>10} {'Mean Latency':>12} {'Fairness':>10} {'Rounds':>8}")
+    print(
+        f"{'Method':<20} {'Final Acc':>10} {'Mean Latency':>12} "
+        f"{'Train-Only':>12} {'Fairness':>10} {'Rounds':>8}"
+    )
     print("-" * 70)
 
     for name, metrics in results.items():
@@ -190,10 +193,17 @@ def _print_comparison_table(results: Dict[str, Any], target_acc: float) -> None:
 
         final_acc = metrics[-1].get("test_acc", 0)
         mean_lat = _mean([m.get("round_latency", 0) for m in metrics])
+        mean_train_only = _mean([
+            m.get("train_only_latency", m.get("round_latency", 0) - m.get("ppo_update_time", 0))
+            for m in metrics
+        ])
         fairness = _mean([m.get("fairness_index", 0) for m in metrics])
         n_rounds = len(metrics)
 
-        print(f"{name:<20} {final_acc:>9.2f}% {mean_lat:>11.2f}s {fairness:>10.3f} {n_rounds:>8}")
+        print(
+            f"{name:<20} {final_acc:>9.2f}% {mean_lat:>11.2f}s "
+            f"{mean_train_only:>11.2f}s {fairness:>10.3f} {n_rounds:>8}"
+        )
 
     print("=" * 70)
 

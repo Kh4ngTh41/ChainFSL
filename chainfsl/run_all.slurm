@@ -20,9 +20,18 @@ N_NODES=20
 GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
 PRETRAIN_ROUNDS=500
+OFFLINE_HASO=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
+
+if [ "$OFFLINE_HASO" -eq 1 ]; then
+    OFFLINE_ARG="--offline_haso"
+    echo "HASO mode: OFFLINE (pretrained PPO inference only)"
+else
+    OFFLINE_ARG=""
+    echo "HASO mode: ONLINE (PPO updates during experiment)"
+fi
 
 module load python312
 
@@ -80,6 +89,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --skip_baselines \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -97,6 +107,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -114,6 +125,7 @@ python experiments/run_experiment.py \
     --alpha 0.1 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -131,6 +143,7 @@ python experiments/run_experiment.py \
     --lazy_fraction 0.2 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -147,6 +160,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -164,6 +178,7 @@ python experiments/run_experiment.py \
     --ablation full \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -180,6 +195,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 

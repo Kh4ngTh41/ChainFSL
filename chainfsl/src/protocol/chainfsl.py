@@ -79,6 +79,7 @@ class RoundMetrics:
     ppo_update_time: float = 0.0
     shapley_time: float = 0.0
     train_time: float = 0.0
+    train_only_latency: float = 0.0  # round latency excluding PPO update
     verification_time: float = 0.0
     comm_time: float = 0.0
     avg_node_train_time: float = 0.0  # avg per-node training time
@@ -101,6 +102,7 @@ class RoundMetrics:
             "ppo_update_time": self.ppo_update_time,
             "shapley_time": self.shapley_time,
             "train_time": self.train_time,
+            "train_only_latency": self.train_only_latency,
             "verification_time": self.verification_time,
             "comm_time": self.comm_time,
             "avg_node_train_time": self.avg_node_train_time,
@@ -200,6 +202,7 @@ class ChainFSLProtocol:
         )
         self.nodes = nodes or create_nodes(config["n_nodes"], distribution=tier_dist)
         self.n_nodes = len(self.nodes)
+        self.haso_online_update = config.get("haso_online_update", True)
 
         # --- Global model ---
         self.model = SplittableResNet18(
@@ -459,6 +462,7 @@ class ChainFSLProtocol:
 
             # Total elapsed
             elapsed = time.perf_counter() - round_start
+            train_only_elapsed = max(0.0, elapsed - ppo_elapsed)
 
             # Compute comm overhead estimate (smashed data * n_nodes in GB)
             comm_estimate = sum(u.get("smashed_bytes", 0) for u in updates) / 1e9
@@ -469,6 +473,7 @@ class ChainFSLProtocol:
                 ppo_update_time=ppo_elapsed,
                 shapley_time=shapley_elapsed,
                 train_time=train_elapsed,
+                train_only_latency=train_only_elapsed,
                 verification_time=verif_elapsed,
                 comm_time=comm_estimate,
                 avg_node_train_time=avg_node_train,
@@ -1215,6 +1220,22 @@ class ChainFSLProtocol:
         if not self.haso_enabled:
             return
 
+        if not self.haso_online_update:
+            # Offline HASO mode: use fixed pretrained PPO for inference only.
+            if self._orchestrator is not None:
+                self._orchestrator.update_shapley(shapley_vals)
+            elif self.cluster_agent_pool is not None:
+                self._update_cluster_agents_shapley(shapley_vals)
+            elif self.agent_pool is not None:
+                self.agent_pool.update_shapley_all(shapley_vals)
+
+            for node_id, reward in rewards.items():
+                progress = self.node_progress.get(node_id)
+                if progress:
+                    progress.last_reward = reward
+                    progress.cumulative_reward += reward
+            return
+
         # Use centralized orchestrator if available
         if self._orchestrator is not None:
             self._orchestrator.update_shapley(shapley_vals)
@@ -1255,6 +1276,7 @@ class ChainFSLProtocol:
         ppo_update_time: float = 0.0,
         shapley_time: float = 0.0,
         train_time: float = 0.0,
+        train_only_latency: float = 0.0,
         verification_time: float = 0.0,
         comm_time: float = 0.0,
         avg_node_train_time: float = 0.0,
@@ -1309,6 +1331,7 @@ class ChainFSLProtocol:
             ppo_update_time=ppo_update_time,
             shapley_time=shapley_time,
             train_time=train_time,
+            train_only_latency=train_only_latency,
             verification_time=verification_time,
             comm_time=comm_time,
             avg_node_train_time=avg_node_train_time,

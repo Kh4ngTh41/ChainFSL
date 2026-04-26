@@ -158,6 +158,11 @@ Examples:
         help="Directory containing pretrained models (default: pretrainppo)",
     )
     parser.add_argument(
+        "--offline_haso",
+        action="store_true",
+        help="Use PPO for orchestration only (disable online PPO updates during experiment).",
+    )
+    parser.add_argument(
         "--cluster_size",
         type=int,
         default=0,
@@ -195,6 +200,8 @@ def run_exp(exp_name: str, args) -> None:
         config["lazy_client_fraction"] = args.lazy_fraction
     if args.cluster_size is not None and args.cluster_size > 0:
         config["cluster_size"] = args.cluster_size
+    if args.offline_haso:
+        config["haso_online_update"] = False
     config["seed"] = args.seed
     config["log_dir"] = args.log_dir
 

@@ -76,6 +76,7 @@ def build_config(
         "local_epochs": 1,
         "sample_fraction": 1.0,
         "haso_enabled": haso_enabled,
+        "haso_online_update": True,
         "ppo_learning_rate": 3e-4,
         "ppo_n_steps": 256,
         "ppo_batch_size": 64,
@@ -222,6 +223,16 @@ def print_summary(exp_name: str, metrics: List[Dict[str, Any]]) -> None:
         print(f"  Train Loss:    {stats['train_loss_mean']:.4f} ± {stats['train_loss_std']:.4f}")
     if "round_latency_mean" in stats:
         print(f"  Latency:       {stats['round_latency_mean']:.2f}s ± {stats['round_latency_std']:.2f}s")
+    if "train_only_latency_mean" in stats:
+        print(
+            f"  Train-Only:    {stats['train_only_latency_mean']:.2f}s "
+            f"± {stats['train_only_latency_std']:.2f}s"
+        )
+    if "ppo_update_time_mean" in stats:
+        print(
+            f"  PPO Update:    {stats['ppo_update_time_mean']:.2f}s "
+            f"± {stats['ppo_update_time_std']:.2f}s"
+        )
     if "fairness_index_mean" in stats:
         print(f"  Fairness:      {stats['fairness_index_mean']:.3f} ± {stats['fairness_index_std']:.3f}")
     if "total_reward_mean" in stats:
