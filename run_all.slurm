@@ -60,8 +60,8 @@ echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initial
 echo "[STEP] GPU visibility check..."
 nvidia-smi -L || true
 
-echo "[STEP] Torch CUDA quick check (timeout 120s)..."
-if ! timeout 120s python -u - << 'PY'
+echo "[STEP] Torch CUDA quick check (timeout 20s)..."
+if ! timeout 20s python -u - << 'PY'
 import torch
 print(f"[CUDA CHECK] torch={torch.__version__} cuda_available={torch.cuda.is_available()} device_count={torch.cuda.device_count()}")
 PY
@@ -72,7 +72,7 @@ fi
 
 if [ "$REQUIRE_CUDA" -eq 1 ]; then
     echo "[STEP] Enforcing CUDA requirement..."
-    if ! timeout 60s python -u - << 'PY'
+    if ! timeout 20s python -u - << 'PY'
 import torch, sys
 if not torch.cuda.is_available():
         print("[FATAL] CUDA not available after environment setup. Abort to avoid slow CPU fallback.")
