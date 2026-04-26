@@ -193,6 +193,8 @@ class ChainFSLProtocol:
         self.cfg = config
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        print("[INIT] ChainFSLProtocol: building node set and global model...", flush=True)
+
         # --- Nodes ---
         tier_dist_list = config.get("tier_distribution", [0.1, 0.3, 0.4, 0.2])
         from ..emulator.tier_factory import TierDistribution
@@ -213,6 +215,8 @@ class ChainFSLProtocol:
             cut_layer=2,
         ).to(self.device)
 
+        print("[INIT] ChainFSLProtocol: loading/partitioning dataset...", flush=True)
+
         # --- Data loaders ---
         self.train_loaders, _, self.test_dataset = get_dataloaders(
             dataset_name=config.get("dataset", "cifar10"),
@@ -223,6 +227,8 @@ class ChainFSLProtocol:
             download=True,
             seed=config.get("seed", 42),
         )
+
+        print("[INIT] ChainFSLProtocol: setting up network, HASO, TVE, GTM, and blockchain...", flush=True)
 
         # --- Network & Gossip ---
         self.net = NetworkEmulator(variance=0.3)
@@ -379,6 +385,8 @@ class ChainFSLProtocol:
 
         # --- Gradient cache (for Tier 1 cosine similarity verification) ---
         self._grad_cache: Dict[int, Dict[str, torch.Tensor]] = {}
+
+        print("[INIT] ChainFSLProtocol: ready.", flush=True)
 
     # -------------------------------------------------------------------------
     # Public API

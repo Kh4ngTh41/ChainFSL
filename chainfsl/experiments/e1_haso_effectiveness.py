@@ -137,6 +137,7 @@ def _run_chainfsl(
 ) -> List[Dict[str, Any]]:
     """Run ChainFSL protocol."""
     import os
+    print("  [ChainFSL] Initializing protocol...", flush=True)
     # Use log_dir for ledger DB to ensure Windows compatibility
     log_dir = config.get("log_dir", "./logs")
     os.makedirs(log_dir, exist_ok=True)
@@ -147,16 +148,19 @@ def _run_chainfsl(
         device=None,  # auto
         db_path=db_path,
     )
+    print("  [ChainFSL] Protocol initialized.", flush=True)
 
     # Attach pretrained orchestrator if available
     if pretrained_orchestrator is not None:
         print(f"  [ChainFSL] Using pretrained orchestrator")
         protocol._orchestrator = pretrained_orchestrator
 
+    print("  [ChainFSL] Starting protocol.run()...", flush=True)
     metrics = protocol.run(
         total_rounds=config["global_rounds"],
         eval_every=5,
     )
+    print("  [ChainFSL] protocol.run() complete.", flush=True)
 
     return [m.to_dict() for m in metrics]
 

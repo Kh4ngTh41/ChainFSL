@@ -179,9 +179,10 @@ Examples:
 
 def run_exp(exp_name: str, args) -> None:
     """Run a single experiment."""
-    print(f"\n{'#' * 60}")
-    print(f"# Running Experiment: {exp_name.upper()}")
-    print(f"{'#' * 60}")
+    print(f"\n{'#' * 60}", flush=True)
+    print(f"# Running Experiment: {exp_name.upper()}", flush=True)
+    print(f"{'#' * 60}", flush=True)
+    print(f"[{exp_name}] Building configuration...", flush=True)
 
     # Build base config
     config = build_config(
@@ -216,10 +217,12 @@ def run_exp(exp_name: str, args) -> None:
     # Ensure log dir
     ensure_dir(args.log_dir)
     ensure_dir(args.checkpoint_dir)
+    print(f"[{exp_name}] Output directories ready.", flush=True)
 
     # Load pretrained orchestrator if specified
     pretrained_orchestrator = None
     if args.pretrain_rounds:
+        print(f"[{exp_name}] Checking pretrained orchestrator...", flush=True)
         from pretrain_pipeline import (
             check_pretrained_exists,
             load_orchestrator,
@@ -283,8 +286,10 @@ def run_exp(exp_name: str, args) -> None:
 
     # Dispatch
     module = EXPERIMENT_MAP[exp_name]
+    print(f"[{exp_name}] Dispatching module {module.__name__}...", flush=True)
 
     if exp_name == "e1":
+        print(f"[{exp_name}] Entering E1 runner...", flush=True)
         module.run(
             config,
             skip_baselines=getattr(args, "skip_baselines", False),
@@ -294,6 +299,7 @@ def run_exp(exp_name: str, args) -> None:
             pretrain_dir=args.pretrain_dir,
         )
     elif exp_name == "e6":
+        print(f"[{exp_name}] Entering E6 runner...", flush=True)
         module.run(
             config,
             ablation_type=args.ablation,
@@ -303,11 +309,13 @@ def run_exp(exp_name: str, args) -> None:
             pretrain_dir=args.pretrain_dir,
         )
     elif exp_name == "e2":
+        print(f"[{exp_name}] Entering E2 runner...", flush=True)
         module.run(config, pretrained_orchestrator=pretrained_orchestrator, pretrain_dir=args.pretrain_dir)
     else:
+        print(f"[{exp_name}] Entering experiment runner...", flush=True)
         module.run(config, pretrained_orchestrator=pretrained_orchestrator, pretrain_dir=args.pretrain_dir)
 
-    print(f"[{exp_name}] Done!")
+    print(f"[{exp_name}] Done!", flush=True)
 
 
 def _get_latest_checkpoint(checkpoint_dir: str, exp_name: str) -> str:

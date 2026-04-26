@@ -39,13 +39,14 @@ else
 fi
 
 module load python312
-echo "[SLURM SCRIPT] chainfsl run_all v2026-04-26-setup-once"
+echo "[SLURM SCRIPT] chainfsl run_all v2026-04-26-import-probe"
 
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 source "$VENV_DIR/bin/activate"
 export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
 export PYTORCH_NVML_BASED_CUDA_CHECK=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
@@ -76,7 +77,7 @@ echo "PPO Pretrain Check"
 echo "=========================================="
 if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
     echo "No pretrained model found. Training PPO offline for $PRETRAIN_ROUNDS rounds..."
-    python pretrain_pipeline.py \
+    python -u pretrain_pipeline.py \
         --rounds $PRETRAIN_ROUNDS \
         --n_nodes $N_NODES \
         --seed 42 \
@@ -93,7 +94,19 @@ fi
 echo "=========================================="
 echo "Running E1: HASO Effectiveness"
 echo "=========================================="
-python experiments/run_experiment.py \
+echo "[STEP] Probing Python import path for experiments runner (timeout 120s)..."
+if ! timeout 120s python -u -X faulthandler - << 'PY'
+print("[PROBE] import experiments.run_experiment ...", flush=True)
+import experiments.run_experiment
+print("[PROBE] import experiments.run_experiment OK", flush=True)
+PY
+then
+    echo "[FATAL] Python import probe failed or timed out before E1 launch."
+    exit 3
+fi
+
+echo "[STEP] Launching E1 command..."
+python -u experiments/run_experiment.py \
     --exp e1 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -112,7 +125,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E2: Scalability"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e2 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -130,7 +143,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E3: Non-IID Data"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e3 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -149,7 +162,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E4: Security"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e4 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -168,7 +181,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E5: Incentive Mechanism"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e5 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -186,7 +199,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E6: Ablation Study"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e6 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -205,7 +218,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E7: Blockchain Overhead"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e7 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
