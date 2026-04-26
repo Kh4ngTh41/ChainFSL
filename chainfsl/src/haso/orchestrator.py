@@ -51,6 +51,7 @@ class HASOOrchestrator:
         n_steps: int = 512,
         batch_size: int = 64,
         n_epochs: int = 10,
+        ppo_device: str = "auto",
         verbose: int = 0,
     ):
         """
@@ -83,6 +84,7 @@ class HASOOrchestrator:
             gae_lambda=0.95,
             clip_range=0.2,
             ent_coef=0.01,
+            device=ppo_device,
             verbose=verbose,
             seed=42,
         )
@@ -450,5 +452,6 @@ def create_orchestrator(
         n_steps=cfg.get("ppo_n_steps", 512),
         batch_size=cfg.get("ppo_batch_size", 64),
         n_epochs=cfg.get("ppo_n_epochs", 10),
+        ppo_device=cfg.get("ppo_device", "auto"),
         verbose=cfg.get("verbose", 0),
     )

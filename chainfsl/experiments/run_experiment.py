@@ -168,6 +168,12 @@ Examples:
         default=0,
         help="Nodes per cluster for hierarchical HASO (e.g., 5). 0=disabled (default per-node agents). Must divide n_nodes evenly.",
     )
+    parser.add_argument(
+        "--ppo_device",
+        default=None,
+        choices=["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
+        help="Device for PPO policies (default: auto).",
+    )
     return parser.parse_args()
 
 
@@ -200,6 +206,8 @@ def run_exp(exp_name: str, args) -> None:
         config["lazy_client_fraction"] = args.lazy_fraction
     if args.cluster_size is not None and args.cluster_size > 0:
         config["cluster_size"] = args.cluster_size
+    if args.ppo_device is not None:
+        config["ppo_device"] = args.ppo_device
     if args.offline_haso:
         config["haso_online_update"] = False
     config["seed"] = args.seed

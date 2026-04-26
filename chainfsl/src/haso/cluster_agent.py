@@ -37,6 +37,7 @@ class ClusterHASOAgent:
         batch_size: int = 64,
         n_epochs: int = 10,
         gamma: float = 0.99,
+        ppo_device: str = "auto",
         verbose: int = 0,
     ):
         """
@@ -66,6 +67,7 @@ class ClusterHASOAgent:
             gae_lambda=0.95,
             clip_range=0.2,
             ent_coef=0.01,
+            device=ppo_device,
             verbose=verbose,
             seed=cluster_id,  # Use cluster_id as seed
         )
@@ -174,6 +176,7 @@ class ClusterAgentPool:
         n_steps: int = 512,
         batch_size: int = 64,
         n_epochs: int = 10,
+        ppo_device: str = "auto",
         verbose: int = 0,
     ) -> None:
         """
@@ -203,6 +206,7 @@ class ClusterAgentPool:
                 n_steps=n_steps,
                 batch_size=batch_size,
                 n_epochs=n_epochs,
+                ppo_device=ppo_device,
                 verbose=verbose,
             )
             self.agents[cluster_id] = agent

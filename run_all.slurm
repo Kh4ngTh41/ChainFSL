@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=mps:2
+#SBATCH --gres=gpu:2
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
@@ -21,6 +21,7 @@ GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
 PRETRAIN_ROUNDS=500
 OFFLINE_HASO=1
+PPO_DEVICE=cuda
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
@@ -36,20 +37,7 @@ fi
 module load python312
 
 pip3 install -r $REQ_FILE
-unset CUDA_VISIBLE_DEVICES
-
-CHECK_OUT=$(/usr/local/bin/gpu_check.sh $REQUIRED_VRAM $SLURM_JOB_ID)
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 10 ]; then echo "$CHECK_OUT"; exit 0
-elif [ $EXIT_CODE -eq 11 ]; then echo "$CHECK_OUT"; exit 1; fi
-BEST_GPU=$CHECK_OUT
-echo "✅ GPU: $BEST_GPU"
-
-export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps-job$SLURM_JOB_ID
-export CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-mps-log-job$SLURM_JOB_ID
-rm -rf $CUDA_MPS_PIPE_DIRECTORY $CUDA_MPS_LOG_DIRECTORY
-mkdir -p $CUDA_MPS_PIPE_DIRECTORY $CUDA_MPS_LOG_DIRECTORY
-export CUDA_VISIBLE_DEVICES=$BEST_GPU
+echo "Requested multiple GPUs via SLURM allocation. PPO will use a CUDA device if available."
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
@@ -61,11 +49,12 @@ echo "PPO Pretrain Check"
 echo "=========================================="
 if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
     echo "No pretrained model found. Training PPO (lightweight) for $PRETRAIN_ROUNDS rounds..."
-    python3 pretrain_simple.py \
+    python3 pretrain_pipeline.py \
         --rounds $PRETRAIN_ROUNDS \
         --n_nodes $N_NODES \
         --seed 42 \
-        --save_dir $PRETRAIN_DIR
+        --ppo_device $PPO_DEVICE \
+        --log_dir ./logs
     echo "Pretrain complete!"
 else
     echo "Pretrained model FOUND at $PRETRAIN_DIR/$PRETRAIN_ROUNDS/ - skipping pretrain"
@@ -84,6 +73,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --skip_baselines \
     --log_dir ./logs \
@@ -102,6 +92,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -120,6 +111,7 @@ python experiments/run_experiment.py \
     --alpha 0.1 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -138,6 +130,7 @@ python experiments/run_experiment.py \
     --lazy_fraction 0.2 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -155,6 +148,7 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -173,6 +167,7 @@ python experiments/run_experiment.py \
     --ablation full \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -190,11 +185,10 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
-
-echo "quit" | nvidia-cuda-mps-control
 echo "=========================================="
 echo "All experiments completed!"
 echo "=========================================="

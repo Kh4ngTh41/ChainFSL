@@ -289,6 +289,7 @@ class ChainFSLProtocol:
                     n_steps=config.get("ppo_n_steps", 512),
                     batch_size=config.get("ppo_batch_size", 64),
                     n_epochs=10,
+                    ppo_device=config.get("ppo_device", "auto"),
                     verbose=0,
                 )
 
@@ -304,6 +305,7 @@ class ChainFSLProtocol:
                     n_steps=config.get("ppo_n_steps", 512),
                     batch_size=config.get("ppo_batch_size", 64),
                     n_epochs=10,
+                    ppo_device=config.get("ppo_device", "auto"),
                     verbose=0,
                 )
 

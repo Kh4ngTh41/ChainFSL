@@ -77,6 +77,7 @@ def build_config(
         "sample_fraction": 1.0,
         "haso_enabled": haso_enabled,
         "haso_online_update": True,
+        "ppo_device": "auto",
         "ppo_learning_rate": 3e-4,
         "ppo_n_steps": 256,
         "ppo_batch_size": 64,

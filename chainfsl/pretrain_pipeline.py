@@ -63,6 +63,7 @@ def pretrain_ppo(
     seed: int = 42,
     log_dir: str = "./logs",
     force_retrain: bool = False,
+    ppo_device: str = "auto",
 ) -> dict:
     """
     Pretrain PPO orchestrator for specified rounds.
@@ -116,6 +117,7 @@ def pretrain_ppo(
         gtm_enabled=True,
         seed=seed,
     )
+    config["ppo_device"] = ppo_device
     config["log_dir"] = log_dir
 
     db_path = str(Path(log_dir) / f"pretrain_{seed}.db")
@@ -458,6 +460,12 @@ Examples:
         help="Directory for logs (default: ./logs)",
     )
     parser.add_argument(
+        "--ppo_device",
+        default="auto",
+        choices=["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
+        help="Device for PPO pretraining (default: auto)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force retrain even if pretrained exists",
@@ -503,6 +511,7 @@ Examples:
                 seed=args.seed,
                 log_dir=args.log_dir,
                 force_retrain=args.force,
+                ppo_device=args.ppo_device,
             )
             print(f"[{rounds}] Status: {result['status']}")
             print(f"[{rounds}] Saved to: {result['save_dir']}")
