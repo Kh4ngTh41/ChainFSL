@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
+#SBATCH --gres=mps:2
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
@@ -17,7 +17,7 @@ set -euo pipefail
 # Hierarchical HASO: k clusters, a=5 nodes/cluster
 # Pretrain: auto-detect, skip if exists
 # =========================================================
-REQUIRED_VRAM=30000
+REQUIRED_VRAM=40000
 N_NODES=20
 GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
@@ -49,7 +49,7 @@ source "$VENV_DIR/bin/activate"
 export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
 export PYTORCH_NVML_BASED_CUDA_CHECK=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" (moved down to probe loop)
 
 if [ "$SETUP_ONCE" -eq 1 ] && [ -f "$VENV_DIR/.chainfsl_env_ready" ]; then
     echo "[ENV] Reusing existing .venv dependencies (setup-once marker found)."
@@ -61,17 +61,44 @@ else
 fi
 echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
-echo "[STEP] GPU visibility check..."
-nvidia-smi -L || true
+echo "[STEP] Probing for a healthy GPU to bypass CUDA deadlocks (Max 7s per GPU)..."
+export CUDA_VISIBLE_DEVICES="-1"
+HEALTHY_GPU=-1
+
+for i in {0..7}; do
+    echo -n "  Testing GPU $i..."
+    # Isolate strictly to one GPU and try to allocate a tensor
+    if timeout 7s python -c "
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = str($i)
+import torch
+torch.zeros(1).cuda()
+" >/dev/null 2>&1; then
+        HEALTHY_GPU=$i
+        echo " OK!"
+        break
+    else
+        echo " DEADLOCKED/FAILED. Skipping."
+    fi
+done
+
+if [ "$HEALTHY_GPU" -eq -1 ]; then
+    echo "[WARN] No healthy GPU found! Forcing PyTorch to CPU mode to avoid deadlocks."
+    export CUDA_VISIBLE_DEVICES=""
+    export REQUIRE_CUDA=0
+else
+    echo "[STEP] Found healthy GPU: $HEALTHY_GPU. Locking down job to this GPU."
+    export CUDA_VISIBLE_DEVICES="$HEALTHY_GPU"
+fi
 
 if [ "$REQUIRE_CUDA" -eq 1 ]; then
-    echo "[STEP] CUDA required; proceeding directly to experiment launch after visibility check."
+    echo "[STEP] CUDA logic validated; proceeding directly to experiment launch."
 fi
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
 # =========================================================
-# PRETRAIN PPO - Lightweight, skip if exists
+# PRETRAIN PPO - Auto-detect: skip if exists
 # =========================================================
 echo "=========================================="
 echo "PPO Pretrain Check"
@@ -84,13 +111,12 @@ if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
         --seed 42 \
         --ppo_device $PPO_DEVICE \
         --log_dir ./logs
-    echo "Pretrain complete!"
 else
     echo "Pretrained model FOUND at $PRETRAIN_DIR/$PRETRAIN_ROUNDS/ - skipping pretrain"
 fi
 
 # =========================================================
-# E1: HASO Effectiveness (skip baselines)
+# E1: HASO Effectiveness (skip baselines - just ChainFSL vs ChainFSL-NoHASO)
 # =========================================================
 echo "=========================================="
 echo "Running E1: HASO Effectiveness"
