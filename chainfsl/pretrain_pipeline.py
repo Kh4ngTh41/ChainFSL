@@ -320,14 +320,25 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
         print(f"[LOAD] No pretrained model found for {rounds} rounds")
         return None
 
-    # Create proper node profiles for n_nodes
+    # Create proper node profiles for actual n_nodes needed by experiment
     print("[LOAD] Creating node profiles...", flush=True)
     tier_dist = TierDistribution(tiers=[1, 2, 3, 4], probabilities=[0.1, 0.3, 0.4, 0.2])
     node_profiles = create_nodes(n_nodes, distribution=tier_dist)
 
+    # Determine original n_nodes the model was pre-trained on to prevent shape mismatch in PPO.load
+    pretrained_n_nodes = n_nodes
+    config_path = Path(base_dir) / str(rounds) / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                pretrained_n_nodes = json.load(f).get("n_nodes", n_nodes)
+                print(f"[LOAD] Found original pre-trained n_nodes={pretrained_n_nodes} to avoid shape mismatches", flush=True)
+        except Exception:
+            pass
+
     # Create orchestrator and load
-    print(f"[LOAD] Creating orchestrator with ppo_device={config.get('ppo_device', 'auto')}...", flush=True)
-    orchestrator = create_orchestrator(n_nodes, node_profiles, config)
+    print(f"[LOAD] Creating orchestrator with pre-trained n_nodes={pretrained_n_nodes} and ppo_device={config.get('ppo_device', 'auto')}...", flush=True)
+    orchestrator = create_orchestrator(pretrained_n_nodes, node_profiles, config)
     print("[LOAD] Loading PPO weights into orchestrator...", flush=True)
 
     timeout_sec = int(config.get("pretrain_load_timeout_sec", 180))

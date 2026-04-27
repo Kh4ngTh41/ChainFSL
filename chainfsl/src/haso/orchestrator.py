@@ -128,7 +128,12 @@ class HASOOrchestrator:
         configs = []
         idx = 0
 
-        for node_id in range(self.n_nodes):
+        # Only decode up to the actual number of profiles provided,
+        # ignoring extra outputs if model was pretrained on more nodes.
+        actual_nodes = len(self.node_profiles)
+        limit = min(self.n_nodes, actual_nodes)
+
+        for node_id in range(limit):
             cut_layer_idx = int(action[idx])
             batch_size_idx = int(action[idx + 1])
             H_idx = int(action[idx + 2])
@@ -187,7 +192,20 @@ class HASOOrchestrator:
 
     def load(self, path: str) -> None:
         """Load orchestrator PPO model."""
-        self.model = PPO.load(path, env=self.env)
+        import shutil
+        import uuid
+        import os
+        tmp_path = f"/tmp/orchestrator_{uuid.uuid4().hex}.zip"
+        print(f"[Orchestrator] Copying {path} to local {tmp_path} to avoid NFS zip deadlocks...", flush=True)
+        try:
+            shutil.copy2(path, tmp_path)
+            device_to_use = self.model.device if hasattr(self.model, "device") else "cpu"
+            print(f"[Orchestrator] Loading PPO from {tmp_path} mapped to device={device_to_use}...", flush=True)
+            self.model = PPO.load(tmp_path, env=self.env, device=device_to_use)
+            print("[Orchestrator] Successfully loaded PPO.", flush=True)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def get_decision_time_stats(self) -> Dict[str, float]:
         """Get decision timing statistics."""
