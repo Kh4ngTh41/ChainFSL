@@ -49,7 +49,7 @@ source "$VENV_DIR/bin/activate"
 export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
 export PYTORCH_NVML_BASED_CUDA_CHECK=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" (moved down to probe loop)
 
 if [ "$SETUP_ONCE" -eq 1 ] && [ -f "$VENV_DIR/.chainfsl_env_ready" ]; then
     echo "[ENV] Reusing existing .venv dependencies (setup-once marker found)."
@@ -61,11 +61,38 @@ else
 fi
 echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
-echo "[STEP] GPU visibility check..."
-nvidia-smi -L || true
+echo "[STEP] Probing for a healthy GPU to bypass CUDA deadlocks (Max 7s per GPU)..."
+export CUDA_VISIBLE_DEVICES="-1"
+HEALTHY_GPU=-1
+
+for i in {0..7}; do
+    echo -n "  Testing GPU $i..."
+    # Isolate strictly to one GPU and try to allocate a tensor
+    if timeout 7s python -c "
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = str($i)
+import torch
+torch.zeros(1).cuda()
+" >/dev/null 2>&1; then
+        HEALTHY_GPU=$i
+        echo " OK!"
+        break
+    else
+        echo " DEADLOCKED/FAILED. Skipping."
+    fi
+done
+
+if [ "$HEALTHY_GPU" -eq -1 ]; then
+    echo "[WARN] No healthy GPU found! Forcing PyTorch to CPU mode to avoid deadlocks."
+    export CUDA_VISIBLE_DEVICES=""
+    export REQUIRE_CUDA=0
+else
+    echo "[STEP] Found healthy GPU: $HEALTHY_GPU. Locking down job to this GPU."
+    export CUDA_VISIBLE_DEVICES="$HEALTHY_GPU"
+fi
 
 if [ "$REQUIRE_CUDA" -eq 1 ]; then
-    echo "[STEP] CUDA required; proceeding directly to experiment launch after visibility check."
+    echo "[STEP] CUDA logic validated; proceeding directly to experiment launch."
 fi
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
