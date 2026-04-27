@@ -24,6 +24,7 @@ CLUSTER_SIZE=5
 PRETRAIN_ROUNDS=50
 OFFLINE_HASO=1
 PPO_DEVICE=cpu
+PRETRAIN_LOAD_TIMEOUT=120
 REQUIRE_CUDA=1
 SETUP_ONCE=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
@@ -112,6 +113,7 @@ python -u experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --skip_baselines \
@@ -131,6 +133,7 @@ python -u experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
@@ -150,6 +153,7 @@ python -u experiments/run_experiment.py \
     --alpha 0.1 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
@@ -169,6 +173,7 @@ python -u experiments/run_experiment.py \
     --lazy_fraction 0.2 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
@@ -187,6 +192,7 @@ python -u experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
@@ -206,6 +212,7 @@ python -u experiments/run_experiment.py \
     --ablation full \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \
@@ -224,6 +231,7 @@ python -u experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
     --ppo_device $PPO_DEVICE \
     $OFFLINE_ARG \
     --log_dir ./logs \

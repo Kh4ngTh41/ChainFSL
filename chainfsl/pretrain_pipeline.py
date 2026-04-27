@@ -20,6 +20,7 @@ import os
 import sys
 import json
 import time
+import signal
 from pathlib import Path
 from datetime import datetime
 
@@ -328,7 +329,30 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
     print(f"[LOAD] Creating orchestrator with ppo_device={config.get('ppo_device', 'auto')}...", flush=True)
     orchestrator = create_orchestrator(n_nodes, node_profiles, config)
     print("[LOAD] Loading PPO weights into orchestrator...", flush=True)
-    orchestrator.load(str(orchestrator_path))
+
+    timeout_sec = int(config.get("pretrain_load_timeout_sec", 180))
+
+    def _on_timeout(signum, frame):
+        raise TimeoutError(f"orchestrator.load timed out after {timeout_sec}s")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        if timeout_sec > 0:
+            signal.signal(signal.SIGALRM, _on_timeout)
+            signal.alarm(timeout_sec)
+        orchestrator.load(str(orchestrator_path))
+    except TimeoutError as e:
+        print(f"[LOAD] ERROR: {e}", flush=True)
+        print("[LOAD] Falling back: return None to allow non-blocking experiment startup.", flush=True)
+        return None
+    except Exception as e:
+        print(f"[LOAD] ERROR while loading orchestrator: {e}", flush=True)
+        print("[LOAD] Falling back: return None to allow non-blocking experiment startup.", flush=True)
+        return None
+    finally:
+        if timeout_sec > 0:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
 
     print(f"[LOAD] Successfully loaded orchestrator from {orchestrator_path}", flush=True)
     return orchestrator

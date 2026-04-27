@@ -174,6 +174,12 @@ Examples:
         choices=["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
         help="Device for PPO policies (default: auto).",
     )
+    parser.add_argument(
+        "--pretrain_load_timeout",
+        type=int,
+        default=180,
+        help="Timeout in seconds for loading pretrained orchestrator (0 disables timeout).",
+    )
     return parser.parse_args()
 
 
@@ -209,6 +215,7 @@ def run_exp(exp_name: str, args) -> None:
         config["cluster_size"] = args.cluster_size
     if args.ppo_device is not None:
         config["ppo_device"] = args.ppo_device
+    config["pretrain_load_timeout_sec"] = args.pretrain_load_timeout
     if args.offline_haso:
         config["haso_online_update"] = False
     config["seed"] = args.seed
@@ -244,20 +251,10 @@ def run_exp(exp_name: str, args) -> None:
             if pretrained_orchestrator:
                 print(f"[{exp_name}] SUCCESS: Loaded pretrained orchestrator")
             else:
-                print(f"[{exp_name}] Failed to load, training fresh...")
-                orchestrator = pretrain_ppo(
-                    n_nodes=n_nodes,
-                    pretrain_rounds=args.pretrain_rounds,
-                    seed=args.seed,
-                    force_retrain=True,
-                )
-                zip_pretrain(args.pretrain_rounds, args.pretrain_dir)
-                pretrained_orchestrator = load_orchestrator(
-                    rounds=args.pretrain_rounds,
-                    n_nodes=n_nodes,
-                    config=config,
-                    base_dir=args.pretrain_dir,
-                )
+                print(f"[{exp_name}] WARN: Pretrained exists but load failed/timed out. Continuing without pretrained orchestrator.")
+                if args.offline_haso:
+                    print(f"[{exp_name}] WARN: offline_haso requested but no pretrained model is active; switching to online HASO updates.")
+                    config["haso_online_update"] = True
         else:
             print(f"[{exp_name}] No pretrained model found at pretrainppo/{args.pretrain_rounds}/")
             print(f"[{exp_name}] Starting pretrain first...")
