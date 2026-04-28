@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 _PROJECT_ROOT = Path(__file__).parent
 import sys
