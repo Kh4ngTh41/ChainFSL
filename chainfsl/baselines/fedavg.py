@@ -143,7 +143,8 @@ class FedAvgBaseline:
                     "loss": avg_loss,
                 }
 
-            with ThreadPoolExecutor(max_workers=min(len(sampled_nodes), 16)) as executor:
+            # Use max_workers=1 to prevent PyTorch autograd deadlocks on SLURM
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 futures = {executor.submit(train_client, n): n for n in sampled_nodes}
                 for future in as_completed(futures):
                     result = future.result()

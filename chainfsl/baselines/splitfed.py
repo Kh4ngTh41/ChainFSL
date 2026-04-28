@@ -159,7 +159,8 @@ class SplitFedBaseline:
                     "loss": avg_loss,
                 }
 
-            with ThreadPoolExecutor(max_workers=min(self.n_nodes, 16)) as executor:
+            # Use max_workers=1 to prevent PyTorch autograd deadlocks on SLURM
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 futures = {executor.submit(train_client, n): n for n in self.nodes}
                 for future in as_completed(futures):
                     result = future.result()

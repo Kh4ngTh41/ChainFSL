@@ -923,9 +923,11 @@ class ChainFSLProtocol:
         # torch.set_num_threads(1) # CRITICAL: This causes deadlocks in PyTorch's autograd engine with ThreadPoolExecutor
         
         # Concurrency on GPU often causes OOM or CUDA context deadlock with 16 threads
-        is_cuda = self.device.type == "cuda"
-        # Run sequentially on CUDA to avoid OOM/deadlock, and use safe parallelism (e.g. 4) on CPU to avoid thrashing
-        workers = 1 if is_cuda else min(self.n_nodes, 4)
+        # Furthermore, SLURM clusters often enforce OMP_NUM_THREADS=1, which causes PyTorch
+        # autograd to deadlock when called concurrently from ThreadPoolExecutor.
+        # We enforce sequential execution (workers=1) to guarantee stability.
+        # (This is fine since we calculate simulated latency for metrics anyway)
+        workers = 1
 
         # Calculate total training steps for the node progress bar
         total_steps = 0
