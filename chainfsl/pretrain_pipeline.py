@@ -22,6 +22,7 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
