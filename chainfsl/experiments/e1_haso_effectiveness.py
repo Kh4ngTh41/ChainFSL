@@ -46,6 +46,7 @@ def run(
     resume: bool = False,
     checkpoint_dir: str = "./checkpoints",
     pretrained_orchestrator=None,
+    cluster_agent_pool=None,
     pretrain_dir: str = "pretrainppo",
 ) -> Dict[str, Any]:
     """
@@ -57,6 +58,7 @@ def run(
         resume: If True, resume from latest checkpoint.
         checkpoint_dir: Directory for checkpoint files.
         pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        cluster_agent_pool: Pre-trained ClusterAgentPool (if available).
         pretrain_dir: Directory containing pretrained models.
 
     Returns:
@@ -75,6 +77,7 @@ def run(
     metrics_chainfsl = _run_chainfsl(
         chainfsl_cfg,
         pretrained_orchestrator=pretrained_orchestrator,
+        cluster_agent_pool=cluster_agent_pool,
     )
     results["chainfsl"] = metrics_chainfsl
     save_results_csv("e1_chainfsl", metrics_chainfsl, config["log_dir"])
@@ -122,6 +125,7 @@ def run(
 def _run_chainfsl(
     config: Dict[str, Any],
     pretrained_orchestrator=None,
+    cluster_agent_pool=None,
 ) -> List[Dict[str, Any]]:
     """Run ChainFSL protocol."""
     import os
@@ -136,8 +140,11 @@ def _run_chainfsl(
         db_path=db_path,
     )
 
-    # Attach pretrained orchestrator if available
-    if pretrained_orchestrator is not None:
+    # Attach pretrained agents if available
+    if cluster_agent_pool is not None:
+        print(f"  [ChainFSL] Using pretrained cluster agent pool")
+        protocol.cluster_agent_pool = cluster_agent_pool
+    elif pretrained_orchestrator is not None:
         print(f"  [ChainFSL] Using pretrained orchestrator")
         protocol._orchestrator = pretrained_orchestrator
 

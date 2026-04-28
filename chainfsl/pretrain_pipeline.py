@@ -331,6 +331,92 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
     return orchestrator
 
 
+def load_cluster_agent_pool(
+    n_nodes: int,
+    cluster_size: int,
+    pretrain_rounds: int,
+    base_dir: str = PRETRAIN_BASE,
+    config: Optional[dict] = None,
+):
+    """
+    Load pretrained ClusterAgentPool from hierarchical pretrain.
+
+    Args:
+        n_nodes: Number of data nodes.
+        cluster_size: Nodes per cluster (a).
+        pretrain_rounds: Pretrain rounds used.
+        base_dir: Base pretrain directory.
+        config: Config dict.
+
+    Returns:
+        ClusterAgentPool instance, or None if not found.
+    """
+    from src.haso.cluster import ClusterManager
+    from src.haso.cluster_agent import ClusterAgentPool, ClusterHASOAgent
+    from src.haso.env import SFLNodeEnv
+    from src.emulator.tier_factory import create_nodes, TierDistribution
+
+    cfg = config or {}
+
+    hier_dir = Path(base_dir) / "hierarchical"
+    hier_key = f"{n_nodes}_c{cluster_size}_r{pretrain_rounds}"
+    info_path = hier_dir / hier_key / "cluster_info.json"
+
+    if not info_path.exists():
+        print(f"[LOAD] Hierarchical pretrain info not found: {info_path}")
+        return None
+
+    # Load cluster info
+    with open(info_path) as f:
+        cluster_info = json.load(f)
+
+    # Create node profiles
+    tier_dist = TierDistribution(tiers=[1, 2, 3, 4], probabilities=[0.1, 0.3, 0.4, 0.2])
+    node_profiles = create_nodes(n_nodes, distribution=tier_dist)
+
+    # Create cluster manager and restore cluster structure
+    cluster_mgr = ClusterManager()
+    clusters = cluster_mgr.form_clusters(n_nodes, cluster_size, node_profiles)
+
+    # Create agents for each cluster
+    agent_pool = ClusterAgentPool(cluster_mgr, node_profiles)
+
+    # Load each cluster's PPO model
+    saved_dir = hier_dir / hier_key
+    for cluster_id, node_ids in clusters.items():
+        agent_path = saved_dir / f"cluster_{cluster_id}_agent.zip"
+        if not agent_path.exists():
+            print(f"[LOAD] Agent for cluster {cluster_id} not found: {agent_path}")
+            continue
+
+        head_id = cluster_mgr.get_cluster_head(cluster_id)
+        head_profile = node_profiles[head_id]
+
+        # Create env for this cluster
+        env = SFLNodeEnv(
+            node_profile=head_profile,
+            n_compute_nodes=len(node_ids),
+            seed=42 + cluster_id * 100,
+        )
+
+        # Create agent and load
+        agent = ClusterHASOAgent(
+            env=env,
+            cluster_id=cluster_id,
+            cluster_node_ids=node_ids,
+            learning_rate=cfg.get("ppo_learning_rate", 3e-4),
+            n_steps=cfg.get("ppo_n_steps", 64),
+            batch_size=cfg.get("ppo_batch_size", 32),
+            n_epochs=cfg.get("ppo_n_epochs", 3),
+            verbose=0,
+        )
+        agent.load(str(agent_path))
+        agent_pool.agents[cluster_id] = agent
+
+    print(f"[LOAD] Loaded {len(agent_pool.agents)} cluster agents from {saved_dir}")
+    return agent_pool
+
+
 def analyze_pretrain_breakeven(
     pretrain_dir: str = PRETRAIN_BASE,
     baseline_latency: float = 137.0,

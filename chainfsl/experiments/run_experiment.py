@@ -217,27 +217,54 @@ def run_exp(exp_name: str, args) -> None:
 
     # Load pretrained orchestrator if specified
     pretrained_orchestrator = None
+    cluster_agent_pool = None
+
     if args.pretrain_rounds:
-        from pretrain_pipeline import (
-            check_pretrained_exists,
-            load_orchestrator,
-            pretrain_ppo,
-            zip_pretrain,
-        )
-        from src.haso.orchestrator import create_orchestrator
+        # Check for hierarchical pretrain first (pretrainppo/hierarchical/)
+        hier_dir = Path(args.pretrain_dir) / "hierarchical"
+        hier_key = f"{config['n_nodes']}_c{config.get('cluster_size', 5)}_r{args.pretrain_rounds}"
+        hier_path = hier_dir / hier_key / "cluster_info.json"
 
-        n_nodes = config["n_nodes"]
+        if hier_path.exists():
+            # Hierarchical pretrain exists - load cluster agents
+            print(f"[{exp_name}] Loading hierarchical pretrained agents from {hier_path.parent}")
+            try:
+                from pretrain_pipeline import load_cluster_agent_pool
+                cluster_agent_pool = load_cluster_agent_pool(
+                    n_nodes=config["n_nodes"],
+                    cluster_size=config.get("cluster_size", 5),
+                    pretrain_rounds=args.pretrain_rounds,
+                    base_dir=args.pretrain_dir,
+                    config=config,
+                )
+                if cluster_agent_pool:
+                    print(f"[{exp_name}] SUCCESS: Loaded hierarchical cluster agents")
+            except Exception as e:
+                print(f"[{exp_name}] Failed to load hierarchical agents: {e}")
+                cluster_agent_pool = None
 
-        if check_pretrained_exists(args.pretrain_rounds, args.pretrain_dir):
-            print(f"[{exp_name}] Loading pretrained orchestrator: {args.pretrain_rounds} rounds")
-            pretrained_orchestrator = load_orchestrator(
-                rounds=args.pretrain_rounds,
-                n_nodes=n_nodes,
-                config=config,
-                base_dir=args.pretrain_dir,
+        # Fall back to centralized pretrain if no hierarchical
+        if cluster_agent_pool is None:
+            from pretrain_pipeline import (
+                check_pretrained_exists,
+                load_orchestrator,
+                pretrain_ppo,
+                zip_pretrain,
             )
-            if pretrained_orchestrator:
-                print(f"[{exp_name}] SUCCESS: Loaded pretrained orchestrator")
+            from src.haso.orchestrator import create_orchestrator
+
+            n_nodes = config["n_nodes"]
+
+            if check_pretrained_exists(args.pretrain_rounds, args.pretrain_dir):
+                print(f"[{exp_name}] Loading pretrained orchestrator: {args.pretrain_rounds} rounds")
+                pretrained_orchestrator = load_orchestrator(
+                    rounds=args.pretrain_rounds,
+                    n_nodes=n_nodes,
+                    config=config,
+                    base_dir=args.pretrain_dir,
+                )
+                if pretrained_orchestrator:
+                    print(f"[{exp_name}] SUCCESS: Loaded pretrained orchestrator")
             else:
                 print(f"[{exp_name}] Failed to load, training fresh...")
                 orchestrator = pretrain_ppo(
@@ -289,6 +316,7 @@ def run_exp(exp_name: str, args) -> None:
             resume=args.resume,
             checkpoint_dir=args.checkpoint_dir,
             pretrained_orchestrator=pretrained_orchestrator,
+            cluster_agent_pool=cluster_agent_pool,
             pretrain_dir=args.pretrain_dir,
         )
     elif exp_name == "e6":
@@ -298,12 +326,13 @@ def run_exp(exp_name: str, args) -> None:
             resume=args.resume,
             checkpoint_dir=args.checkpoint_dir,
             pretrained_orchestrator=pretrained_orchestrator,
+            cluster_agent_pool=cluster_agent_pool,
             pretrain_dir=args.pretrain_dir,
         )
     elif exp_name == "e2":
-        module.run(config, pretrained_orchestrator=pretrained_orchestrator, pretrain_dir=args.pretrain_dir)
+        module.run(config, pretrained_orchestrator=pretrained_orchestrator, cluster_agent_pool=cluster_agent_pool, pretrain_dir=args.pretrain_dir)
     else:
-        module.run(config, pretrained_orchestrator=pretrained_orchestrator, pretrain_dir=args.pretrain_dir)
+        module.run(config, pretrained_orchestrator=pretrained_orchestrator, cluster_agent_pool=cluster_agent_pool, pretrain_dir=args.pretrain_dir)
 
     print(f"[{exp_name}] Done!")
 
