@@ -243,7 +243,7 @@ def run_exp(exp_name: str, args) -> None:
                 print(f"[{exp_name}] Failed to load hierarchical agents: {e}")
                 cluster_agent_pool = None
 
-        # Fall back to centralized pretrain if no hierarchical
+        # Fall back to centralized pretrain only if hierarchical failed
         if cluster_agent_pool is None:
             from pretrain_pipeline import (
                 check_pretrained_exists,
@@ -280,23 +280,6 @@ def run_exp(exp_name: str, args) -> None:
                     config=config,
                     base_dir=args.pretrain_dir,
                 )
-        else:
-            print(f"[{exp_name}] No pretrained model found at pretrainppo/{args.pretrain_rounds}/")
-            print(f"[{exp_name}] Starting pretrain first...")
-            orchestrator = pretrain_ppo(
-                n_nodes=n_nodes,
-                pretrain_rounds=args.pretrain_rounds,
-                seed=args.seed,
-                force_retrain=False,
-            )
-            zip_path = zip_pretrain(args.pretrain_rounds, args.pretrain_dir)
-            print(f"[{exp_name}] Pretrained and zipped to: {zip_path}")
-            pretrained_orchestrator = load_orchestrator(
-                rounds=args.pretrain_rounds,
-                n_nodes=n_nodes,
-                config=config,
-                base_dir=args.pretrain_dir,
-            )
 
     # Resume from checkpoint if requested
     if args.resume:
