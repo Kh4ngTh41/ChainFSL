@@ -166,7 +166,18 @@ class SplitFedBaseline:
                     if result:
                         client_results.append(result)
 
-            elapsed = time.perf_counter() - round_start
+            # Calculate simulated latency
+            simulated_latency = 0.0
+            for n in self.nodes:
+                bs = self.cfg.get("batch_size_default", 32)
+                base_flops = 1e8 * (self.cut_layer / 4.0) * (bs / 32.0)
+                t_comp = n.compute_time(base_flops)
+                activation_bytes = SplittableResNet18.smashed_data_size(self.cut_layer, bs)
+                t_comm = n.comm_time(activation_bytes)
+                if t_comp + t_comm > simulated_latency:
+                    simulated_latency = t_comp + t_comm
+
+            elapsed = simulated_latency if simulated_latency > 0 else (time.perf_counter() - round_start)
             avg_loss = float(np.mean([r["loss"] for r in client_results]))
 
             metrics = {

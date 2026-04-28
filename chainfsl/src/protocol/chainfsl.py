@@ -437,7 +437,28 @@ class ChainFSLProtocol:
             # Phase 2-3: SFL training + TVE proof generation
             train_start = time.perf_counter()
             updates, proofs, train_losses = self._phase_training(configs)
-            train_elapsed = time.perf_counter() - train_start
+            # Compute simulated training time (bottlenecked by the slowest node)
+            # In a real distributed system, nodes run in parallel. For single machine simulation,
+            # using wall-clock time incorrectly penalizes HASO because HASO offloads more compute
+            # to clients, which increases sequential wall-clock time but decreases parallel max time.
+            simulated_train_time = 0.0
+            for node in self.nodes:
+                cfg = configs.get(node.node_id)
+                if not cfg: continue
+                cut = cfg.get("cut_layer", 2)
+                bs = cfg.get("batch_size", 32)
+                
+                # Compute T_comp and T_comm
+                base_flops = 1e8 * (cut / 4.0) * (bs / 32.0)
+                t_comp = node.compute_time(base_flops)
+                activation_bytes = SplittableResNet18.smashed_data_size(cut, bs)
+                t_comm = node.comm_time(activation_bytes)
+                
+                total_node_time = t_comp + t_comm
+                if total_node_time > simulated_train_time:
+                    simulated_train_time = total_node_time
+                    
+            train_elapsed = simulated_train_time if simulated_train_time > 0 else (time.perf_counter() - train_start)
 
             # Per-node train time tracking (from train_losses keys)
             node_train_times = [train_elapsed] * len(train_losses)
@@ -477,9 +498,9 @@ class ChainFSLProtocol:
             self._phase_haso_update(shapley_vals, rewards)
             ppo_elapsed = time.perf_counter() - ppo_start
 
-            # Total elapsed
-            elapsed = time.perf_counter() - round_start
-            train_only_elapsed = max(0.0, elapsed - ppo_elapsed)
+            # Total elapsed (using simulated train time to properly reflect parallel distribution)
+            elapsed = train_elapsed + verif_elapsed + shapley_elapsed + ppo_elapsed
+            train_only_elapsed = train_elapsed + verif_elapsed + shapley_elapsed
             self._prev_round_latency = elapsed
 
             # Compute comm overhead estimate (smashed data * n_nodes in GB)
@@ -898,13 +919,13 @@ class ChainFSLProtocol:
         train_losses: Dict[int, float] = {}
         
         # Prevent OpenMP thread explosion (CPU Thrashing) when using ThreadPoolExecutor
-        original_threads = torch.get_num_threads()
-        torch.set_num_threads(1)
+        # original_threads = torch.get_num_threads()
+        # torch.set_num_threads(1) # CRITICAL: This causes deadlocks in PyTorch's autograd engine with ThreadPoolExecutor
         
         # Concurrency on GPU often causes OOM or CUDA context deadlock with 16 threads
         is_cuda = self.device.type == "cuda"
-        # Run sequentially on CUDA to avoid OOM/deadlock, or safe parallelism on CPU
-        workers = 1 if is_cuda else min(self.n_nodes, 16)
+        # Run sequentially on CUDA to avoid OOM/deadlock, and use safe parallelism (e.g. 4) on CPU to avoid thrashing
+        workers = 1 if is_cuda else min(self.n_nodes, 4)
 
         # Calculate total training steps for the node progress bar
         total_steps = 0
@@ -1042,7 +1063,7 @@ class ChainFSLProtocol:
                     proofs.append(proof)
 
         # Restore OpenMP threads
-        torch.set_num_threads(original_threads)
+        # torch.set_num_threads(original_threads)
         
         # Close progress bar
         node_pbar.close()
