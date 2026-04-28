@@ -16,7 +16,7 @@ from typing import Dict, Optional, List
 @dataclass
 class NodeProgressInfo:
     """Progress info for a single node."""
-    node_id: int
+    node_id: int = 0
     current_round: int = 0
     epochs_trained: int = 0
     total_epochs_expected: int = 0

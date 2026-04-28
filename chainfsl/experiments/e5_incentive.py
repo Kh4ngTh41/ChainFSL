@@ -28,6 +28,7 @@ from experiments.utils import save_results_csv, print_summary, ensure_dir
 def run(
     config: Dict[str, Any],
     pretrained_orchestrator=None,
+    cluster_agent_pool=None,
     pretrain_dir: str = "pretrainppo",
 ) -> Dict[str, Any]:
     """
@@ -38,6 +39,7 @@ def run(
     Args:
         config: Base config dict.
         pretrained_orchestrator: Pre-trained HASOOrchestrator (if available).
+        cluster_agent_pool: Pre-trained ClusterAgentPool (if available).
         pretrain_dir: Directory containing pretrained models.
     """
     print("=" * 60)
