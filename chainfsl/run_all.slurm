@@ -4,7 +4,6 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
@@ -61,39 +60,9 @@ else
 fi
 echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
-echo "[STEP] Probing for a healthy GPU to bypass CUDA deadlocks (Max 7s per GPU)..."
-export CUDA_VISIBLE_DEVICES="-1"
-HEALTHY_GPU=-1
-
-for i in {0..7}; do
-    echo -n "  Testing GPU $i..."
-    # Isolate strictly to one GPU and try to allocate a tensor
-    if timeout 7s python -c "
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = str($i)
-import torch
-torch.zeros(1).cuda()
-" >/dev/null 2>&1; then
-        HEALTHY_GPU=$i
-        echo " OK!"
-        break
-    else
-        echo " DEADLOCKED/FAILED. Skipping."
-    fi
-done
-
-if [ "$HEALTHY_GPU" -eq -1 ]; then
-    echo "[WARN] No healthy GPU found! Forcing PyTorch to CPU mode to avoid deadlocks."
-    export CUDA_VISIBLE_DEVICES=""
-    export REQUIRE_CUDA=0
-else
-    echo "[STEP] Found healthy GPU: $HEALTHY_GPU. Locking down job to this GPU."
-    export CUDA_VISIBLE_DEVICES="$HEALTHY_GPU"
-fi
-
-if [ "$REQUIRE_CUDA" -eq 1 ]; then
-    echo "[STEP] CUDA logic validated; proceeding directly to experiment launch."
-fi
+echo "[STEP] CPU-only mode selected. Bypassing CUDA checks."
+export CUDA_VISIBLE_DEVICES=""
+export REQUIRE_CUDA=0
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
