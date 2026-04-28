@@ -58,11 +58,13 @@ def check_pretrained_exists(rounds: int, base_dir: str = PRETRAIN_BASE) -> bool:
 
 
 def pretrain_ppo(
-    n_nodes: int,
-    pretrain_rounds: int,
+    n_nodes: int = 10,
+    pretrain_rounds: int = 200,
     seed: int = 42,
     log_dir: str = "./logs",
+    base_dir: str = PRETRAIN_BASE,
     force_retrain: bool = False,
+    ppo_device: str = "auto",
 ) -> dict:
     """
     Pretrain PPO orchestrator for specified rounds.
@@ -117,6 +119,7 @@ def pretrain_ppo(
         seed=seed,
     )
     config["log_dir"] = log_dir
+    config["ppo_device"] = ppo_device
 
     db_path = str(Path(log_dir) / f"pretrain_{seed}.db")
 
@@ -321,7 +324,8 @@ def load_orchestrator(rounds: int, n_nodes: int, config: dict, base_dir: str = P
 
     # Create orchestrator and load
     orchestrator = create_orchestrator(n_nodes, node_profiles, config)
-    orchestrator.load(str(orchestrator_path))
+    device = config.get("ppo_device", "auto")
+    orchestrator.load(str(orchestrator_path), device=device)
 
     print(f"[LOAD] Successfully loaded orchestrator from {orchestrator_path}")
     return orchestrator
@@ -477,6 +481,12 @@ Examples:
         action="store_true",
         help="Analyze breakeven point",
     )
+    parser.add_argument(
+        "--ppo_device",
+        type=str,
+        default="auto",
+        help="Device to run PPO on (e.g. cpu, cuda, auto)",
+    )
 
     args = parser.parse_args()
 
@@ -503,6 +513,7 @@ Examples:
                 seed=args.seed,
                 log_dir=args.log_dir,
                 force_retrain=args.force,
+                ppo_device=args.ppo_device,
             )
             print(f"[{rounds}] Status: {result['status']}")
             print(f"[{rounds}] Saved to: {result['save_dir']}")

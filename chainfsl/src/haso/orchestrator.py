@@ -52,12 +52,14 @@ class HASOOrchestrator:
         batch_size: int = 64,
         n_epochs: int = 10,
         verbose: int = 0,
+        device: str = "auto",
     ):
         """
         Args:
             n_nodes: Number of data nodes in the federation.
             node_profiles: List of HardwareProfile for each node.
             reward_weights: (alpha, beta, gamma) for reward function.
+            device: Device to run PPO on ("auto", "cpu", "cuda").
         """
         self.n_nodes = n_nodes
         self.node_profiles = node_profiles
@@ -85,6 +87,7 @@ class HASOOrchestrator:
             ent_coef=0.01,
             verbose=verbose,
             seed=42,
+            device=device,
         )
 
         # Per-node Shapley tracking for reward shaping
@@ -183,9 +186,9 @@ class HASOOrchestrator:
         """Save orchestrator PPO model."""
         self.model.save(path)
 
-    def load(self, path: str) -> None:
+    def load(self, path: str, device: str = "auto") -> None:
         """Load orchestrator PPO model."""
-        self.model = PPO.load(path, env=self.env)
+        self.model = PPO.load(path, env=self.env, device=device)
 
     def get_decision_time_stats(self) -> Dict[str, float]:
         """Get decision timing statistics."""
@@ -451,4 +454,5 @@ def create_orchestrator(
         batch_size=cfg.get("ppo_batch_size", 64),
         n_epochs=cfg.get("ppo_n_epochs", 10),
         verbose=cfg.get("verbose", 0),
+        device=cfg.get("ppo_device", "auto"),
     )

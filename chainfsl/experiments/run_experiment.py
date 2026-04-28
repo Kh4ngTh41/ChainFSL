@@ -168,6 +168,12 @@ Examples:
         action="store_true",
         help="Run HASO in inference-only mode (no PPO weight updates during experiment).",
     )
+    parser.add_argument(
+        "--ppo_device",
+        type=str,
+        default="auto",
+        help="Device to run PPO on (e.g. cpu, cuda, auto)",
+    )
     return parser.parse_args()
 
 
@@ -203,6 +209,7 @@ def run_exp(exp_name: str, args) -> None:
     config["seed"] = args.seed
     config["log_dir"] = args.log_dir
     config["offline_haso"] = getattr(args, "offline_haso", False)
+    config["ppo_device"] = getattr(args, "ppo_device", "auto")
 
     # Ensure log dir
     ensure_dir(args.log_dir)

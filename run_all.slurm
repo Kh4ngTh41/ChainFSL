@@ -4,6 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
+#SBATCH --gres=mps:1
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
@@ -32,17 +33,17 @@ GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
 PRETRAIN_ROUNDS=50
 OFFLINE_HASO=1
-PPO_DEVICE=cpu
+PPO_DEVICE=cuda
 SETUP_ONCE=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
 
 if [ "$OFFLINE_HASO" -eq 1 ]; then
-    OFFLINE_ARG="--offline_haso"
+    OFFLINE_ARG="--offline_haso --ppo_device $PPO_DEVICE"
     echo "HASO mode: OFFLINE (pretrained PPO inference only, PPO_DEVICE=$PPO_DEVICE)"
 else
-    OFFLINE_ARG=""
+    OFFLINE_ARG="--ppo_device $PPO_DEVICE"
     echo "HASO mode: ONLINE (PPO updates during experiment, PPO_DEVICE=$PPO_DEVICE)"
 fi
 
@@ -65,9 +66,9 @@ else
     touch "$VENV_DIR/.chainfsl_env_ready"
 fi
 
-echo "[STEP] CPU-only mode selected to avoid CUDA context deadlocks on SLURM."
-export CUDA_VISIBLE_DEVICES=""
-export REQUIRE_CUDA=0
+echo "[STEP] GPU mode selected. Sequential execution prevents CUDA context deadlocks."
+# Use the GPU assigned by SLURM
+export REQUIRE_CUDA=1
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
