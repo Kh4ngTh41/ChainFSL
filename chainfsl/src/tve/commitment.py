@@ -56,13 +56,13 @@ class CommitmentVerifier:
     @staticmethod
     def commit_input(x: torch.Tensor) -> bytes:
         """h_i = Hash(x_i) — commit before training."""
-        data = x.detach().numpy().tobytes()
+        data = x.detach().cpu().numpy().tobytes()
         return hashlib.sha256(data).digest()
 
     @staticmethod
     def commit_activation(a: torch.Tensor) -> bytes:
         """Hash of activation tensor."""
-        data = a.detach().numpy().tobytes()
+        data = a.detach().cpu().numpy().tobytes()
         return hashlib.sha256(data).digest()
 
     @staticmethod
@@ -70,7 +70,7 @@ class CommitmentVerifier:
         """Hash of model weights."""
         # Serialize state dict deterministically
         state_bytes = b"".join(
-            v.detach().numpy().tobytes() for v in sorted(model_state.values(), key=lambda x: str(x.shape))
+            v.detach().cpu().numpy().tobytes() for v in sorted(model_state.values(), key=lambda x: str(x.shape))
         )
         return hashlib.sha256(state_bytes).digest()
 
