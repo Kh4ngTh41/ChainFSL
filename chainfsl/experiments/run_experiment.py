@@ -163,6 +163,11 @@ Examples:
         default=0,
         help="Nodes per cluster for hierarchical HASO (e.g., 5). 0=disabled (default per-node agents). Must divide n_nodes evenly.",
     )
+    parser.add_argument(
+        "--offline_haso",
+        action="store_true",
+        help="Run HASO in inference-only mode (no PPO weight updates during experiment).",
+    )
     return parser.parse_args()
 
 
@@ -197,6 +202,7 @@ def run_exp(exp_name: str, args) -> None:
         config["cluster_size"] = args.cluster_size
     config["seed"] = args.seed
     config["log_dir"] = args.log_dir
+    config["offline_haso"] = getattr(args, "offline_haso", False)
 
     # Ensure log dir
     ensure_dir(args.log_dir)

@@ -131,7 +131,7 @@ class SFLTrainer:
         dataloader,
         H: int,
         verbose: bool = False,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float]:
         """
         Run H local epochs on a dataloader.
 
@@ -141,11 +141,13 @@ class SFLTrainer:
             verbose: Print progress.
 
         Returns:
-            (avg_loss, total_time) tuple.
+            (avg_loss, total_T_comp, total_T_comm) tuple.
         """
         self.client.backbone.train()
         total_loss = 0.0
         total_steps = 0
+        total_t_comp = 0.0
+        total_t_comm = 0.0
 
         for epoch in range(H):
             epoch_loss = 0.0
@@ -153,6 +155,8 @@ class SFLTrainer:
             for inputs, labels in dataloader:
                 result = self.local_step(inputs, labels)
                 epoch_loss += result.loss
+                total_t_comp += result.T_comp
+                total_t_comm += result.T_comm
                 steps += 1
                 total_steps += 1
 
@@ -161,7 +165,7 @@ class SFLTrainer:
             if verbose:
                 print(f"  Node {self.node_id} epoch {epoch+1}/{H}: loss={avg_epoch_loss:.4f}")
 
-        return total_loss / max(total_steps, 1), 0.0  # time tracked per-step
+        return total_loss / max(total_steps, 1), total_t_comp, total_t_comm
 
     def get_client_state(self) -> Dict[str, torch.Tensor]:
         """Return client-side state dict for aggregation."""

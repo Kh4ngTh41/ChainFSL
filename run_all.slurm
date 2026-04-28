@@ -4,11 +4,22 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=mps:2
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
 #SBATCH --error=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.err
+
+set -euo pipefail
+
+# =========================================================
+# PREVENT PYTORCH CPU THRASHING DEADLOCKS ON SLURM
+# PyTorch os.cpu_count() sees 128 cores on DGX but cgroups only allows 8.
+# This causes massive thread spinning and deadlocks during forward/backward.
+# =========================================================
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export torch_num_threads=$SLURM_CPUS_PER_TASK
 
 # =========================================================
 # FULL EXPERIMENT SUITE - All 7 experiments
@@ -19,51 +30,67 @@ REQUIRED_VRAM=30000
 N_NODES=20
 GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
-PRETRAIN_ROUNDS=500
+PRETRAIN_ROUNDS=50
+OFFLINE_HASO=1
+PPO_DEVICE=cpu
+SETUP_ONCE=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
 
+if [ "$OFFLINE_HASO" -eq 1 ]; then
+    OFFLINE_ARG="--offline_haso"
+    echo "HASO mode: OFFLINE (pretrained PPO inference only, PPO_DEVICE=$PPO_DEVICE)"
+else
+    OFFLINE_ARG=""
+    echo "HASO mode: ONLINE (PPO updates during experiment, PPO_DEVICE=$PPO_DEVICE)"
+fi
+
 module load python312
+echo "[SLURM SCRIPT] chainfsl run_all stable version"
 
-pip3 install -r $REQ_FILE
-unset CUDA_VISIBLE_DEVICES
+if [ ! -d "$VENV_DIR" ]; then
+    python3 -m venv "$VENV_DIR"
+fi
+source "$VENV_DIR/bin/activate"
+export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
 
-CHECK_OUT=$(/usr/local/bin/gpu_check.sh $REQUIRED_VRAM $SLURM_JOB_ID)
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 10 ]; then echo "$CHECK_OUT"; exit 0
-elif [ $EXIT_CODE -eq 11 ]; then echo "$CHECK_OUT"; exit 1; fi
-BEST_GPU=$CHECK_OUT
-echo "✅ GPU: $BEST_GPU"
+if [ "$SETUP_ONCE" -eq 1 ] && [ -f "$VENV_DIR/.chainfsl_env_ready" ]; then
+    echo "[ENV] Reusing existing .venv dependencies (setup-once marker found)."
+else
+    echo "[ENV] Installing/updating dependencies in .venv..."
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install -r $REQ_FILE
+    touch "$VENV_DIR/.chainfsl_env_ready"
+fi
 
-export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps-job$SLURM_JOB_ID
-export CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-mps-log-job$SLURM_JOB_ID
-rm -rf $CUDA_MPS_PIPE_DIRECTORY $CUDA_MPS_LOG_DIRECTORY
-mkdir -p $CUDA_MPS_PIPE_DIRECTORY $CUDA_MPS_LOG_DIRECTORY
-export CUDA_VISIBLE_DEVICES=$BEST_GPU
+echo "[STEP] CPU-only mode selected to avoid CUDA context deadlocks on SLURM."
+export CUDA_VISIBLE_DEVICES=""
+export REQUIRE_CUDA=0
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
 # =========================================================
-# PRETRAIN PPO - Lightweight, skip if exists
+# PRETRAIN PPO - Auto-detect: skip if exists
 # =========================================================
 echo "=========================================="
 echo "PPO Pretrain Check"
 echo "=========================================="
 if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
-    echo "No pretrained model found. Training PPO (lightweight) for $PRETRAIN_ROUNDS rounds..."
-    python3 pretrain_simple.py \
+    echo "No pretrained model found. Training PPO offline for $PRETRAIN_ROUNDS rounds..."
+    python -u pretrain_pipeline.py \
         --rounds $PRETRAIN_ROUNDS \
         --n_nodes $N_NODES \
         --seed 42 \
-        --save_dir $PRETRAIN_DIR
-    echo "Pretrain complete!"
+        --ppo_device $PPO_DEVICE \
+        --log_dir ./logs
 else
     echo "Pretrained model FOUND at $PRETRAIN_DIR/$PRETRAIN_ROUNDS/ - skipping pretrain"
 fi
 
 # =========================================================
-# E1: HASO Effectiveness (skip baselines)
+# E1: HASO Effectiveness
 # =========================================================
 echo "=========================================="
 echo "Running E1: HASO Effectiveness"
@@ -75,9 +102,9 @@ python experiments/run_experiment.py \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
-    --skip_baselines \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
 # =========================================================
 # E2: Scalability
@@ -93,24 +120,25 @@ python experiments/run_experiment.py \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
 # =========================================================
-# E3: Non-IID
+# E3: Non-IID Robustness
 # =========================================================
 echo "=========================================="
-echo "Running E3: Non-IID Data"
+echo "Running E3: Non-IID Robustness"
 echo "=========================================="
 python experiments/run_experiment.py \
     --exp e3 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
     --cluster_size $CLUSTER_SIZE \
-    --alpha 0.1 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
 # =========================================================
 # E4: Security
@@ -127,7 +155,8 @@ python experiments/run_experiment.py \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
 # =========================================================
 # E5: Incentive
@@ -143,7 +172,8 @@ python experiments/run_experiment.py \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
 # =========================================================
 # E6: Ablation
@@ -156,11 +186,12 @@ python experiments/run_experiment.py \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
     --cluster_size $CLUSTER_SIZE \
-    --ablation full \
+    --ablation no_haso \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
 # =========================================================
 # E7: Blockchain Overhead
@@ -176,9 +207,9 @@ python experiments/run_experiment.py \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
     --log_dir ./logs \
-    --checkpoint_dir ./checkpoints
+    --checkpoint_dir ./checkpoints \
+    $OFFLINE_ARG
 
-echo "quit" | nvidia-cuda-mps-control
 echo "=========================================="
-echo "All experiments completed!"
+echo "ALL EXPERIMENTS COMPLETED"
 echo "=========================================="

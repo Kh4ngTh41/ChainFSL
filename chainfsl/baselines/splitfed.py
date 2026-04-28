@@ -125,6 +125,7 @@ class SplitFedBaseline:
                 loader = self.train_loaders[node.node_id]
 
                 client_model.train()
+                t_comp_start = time.perf_counter()
                 total_loss = 0.0
                 n_batches = 0
 
@@ -151,27 +152,41 @@ class SplitFedBaseline:
                         total_loss += loss.item()
                         n_batches += 1
 
+                t_comp_end = time.perf_counter()
+
+                # SplitFed sends intermediate activations
+                batch_size = loader.batch_size if loader.batch_size else 32
+                smashed_bytes = SplittableResNet18.smashed_data_size(self.cut_layer, batch_size)
+                mean_bw = node.bandwidth_mbps * 1e6 / 8
+                t_comm = smashed_bytes / max(mean_bw, 1.0) * n_batches  # per batch
+
                 avg_loss = total_loss / max(n_batches, 1)
                 return {
                     "node_id": node.node_id,
                     "client_state": {k: v.clone().detach().cpu() for k, v in client_model.state_dict().items()},
                     "data_size": len(loader.dataset),
                     "loss": avg_loss,
+                    "t_comp": t_comp_end - t_comp_start,
+                    "t_comm": t_comm,
                 }
 
-            with ThreadPoolExecutor(max_workers=min(self.n_nodes, 16)) as executor:
-                futures = {executor.submit(train_client, n): n for n in self.nodes}
-                for future in as_completed(futures):
-                    result = future.result()
-                    if result:
-                        client_results.append(result)
+            # Execute sequentially to prevent PyTorch deadlocks
+            for node in self.nodes:
+                result = train_client(node)
+                if result:
+                    client_results.append(result)
 
-            elapsed = time.perf_counter() - round_start
-            avg_loss = float(np.mean([r["loss"] for r in client_results]))
+            # Simulated latency (max of client total time)
+            if client_results:
+                simulated_latency = max(c["t_comp"] + c["t_comm"] for c in client_results)
+            else:
+                simulated_latency = 0.0
+
+            avg_loss = float(np.mean([r["loss"] for r in client_results])) if client_results else 0.0
 
             metrics = {
                 "round": t,
-                "round_latency": elapsed,
+                "round_latency": simulated_latency,
                 "train_loss": avg_loss,
                 "cut_layer": self.cut_layer,
                 "n_participants": len(client_results),

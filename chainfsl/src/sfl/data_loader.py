@@ -6,7 +6,7 @@ Supports CIFAR-10/100 and MedMNIST with Dirichlet-based non-IID partition.
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset, Dataset
+from torch.utils.data import DataLoader, Subset, Dataset, TensorDataset
 from torchvision import datasets, transforms
 from typing import List, Tuple, Optional, Union
 
@@ -115,20 +115,54 @@ def get_cifar100_transforms(train: bool = True, img_size: int = 32) -> transform
     ])
 
 
+class CachedDataset(Dataset):
+    """
+    Pre-caches all transformed samples as tensors in RAM.
+
+    Eliminates the per-sample PIL.Image.fromarray() call in torchvision CIFAR
+    __getitem__, which is a severe performance bottleneck (especially on NFS).
+    After initial caching, data access is a simple tensor index operation.
+    """
+
+    def __init__(self, base_dataset: Dataset):
+        """Pre-transform and cache all samples."""
+        self.data = []
+        self.targets = []
+        print(f"  [CachedDataset] Pre-caching {len(base_dataset)} samples...", end="", flush=True)
+        for i in range(len(base_dataset)):
+            x, y = base_dataset[i]
+            self.data.append(x)
+            self.targets.append(y)
+        # Stack into single tensors for fast indexing
+        self.data = torch.stack(self.data)
+        self.targets = torch.tensor(self.targets, dtype=torch.long)
+        print(f" done. Shape={self.data.shape}", flush=True)
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.targets[idx]
+
+
 def load_cifar10(data_dir: str = "./data", download: bool = True) -> Dataset:
-    return datasets.CIFAR10(data_dir, train=True, download=download, transform=get_cifar10_transforms(True))
+    raw = datasets.CIFAR10(data_dir, train=True, download=download, transform=get_cifar10_transforms(True))
+    return CachedDataset(raw)
 
 
 def load_cifar100(data_dir: str = "./data", download: bool = True) -> Dataset:
-    return datasets.CIFAR100(data_dir, train=True, download=download, transform=get_cifar100_transforms(True))
+    raw = datasets.CIFAR100(data_dir, train=True, download=download, transform=get_cifar100_transforms(True))
+    return CachedDataset(raw)
 
 
 def load_cifar10_test(data_dir: str = "./data", download: bool = True) -> Dataset:
-    return datasets.CIFAR10(data_dir, train=False, download=download, transform=get_cifar10_transforms(False))
+    raw = datasets.CIFAR10(data_dir, train=False, download=download, transform=get_cifar10_transforms(False))
+    return CachedDataset(raw)
 
 
 def load_cifar100_test(data_dir: str = "./data", download: bool = True) -> Dataset:
-    return datasets.CIFAR100(data_dir, train=False, download=download, transform=get_cifar100_transforms(False))
+    raw = datasets.CIFAR100(data_dir, train=False, download=download, transform=get_cifar100_transforms(False))
+    return CachedDataset(raw)
 
 
 def get_dataloaders(
