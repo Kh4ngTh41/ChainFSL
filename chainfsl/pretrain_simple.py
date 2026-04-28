@@ -44,7 +44,7 @@ def simple_pretrain(
     Returns:
         Dict with pretrain stats.
     """
-    # Device
+    # Device - FORCE GPU for PPO
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*60}")
     print(f"PPO PRETRAIN SUMMARY")
@@ -61,16 +61,17 @@ def simple_pretrain(
     tier_dist = TierDistribution(tiers=[1, 2, 3, 4], probabilities=[0.1, 0.3, 0.4, 0.2])
     profiles = create_nodes(n_nodes, distribution=tier_dist)
 
-    # Create orchestrator with PPO
+    # Create orchestrator with PPO - USE GPU via device parameter
     orchestrator = HASOOrchestrator(
         n_nodes=n_nodes,
         node_profiles=profiles,
         reward_weights=(1.0, 0.5, 0.1),
         learning_rate=3e-4,
-        n_steps=128,
-        batch_size=64,
-        n_epochs=5,
+        n_steps=64,  # Reduced for faster pretrain
+        batch_size=32,  # Reduced batch
+        n_epochs=3,  # Fewer epochs - simulation doesn't need many
         verbose=0,  # Quiet - tqdm will show progress
+        device=device,  # FORCE GPU
     )
 
     save_path = Path(save_dir) / str(pretrain_rounds) / "orchestrator.zip"

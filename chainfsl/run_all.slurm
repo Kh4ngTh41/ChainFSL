@@ -45,26 +45,28 @@ export CUDA_VISIBLE_DEVICES=$BEST_GPU
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
 # =========================================================
-# PRETRAIN PPO - Auto-detect: skip if exists
+# PRETRAIN PPO - Hierarchical, auto-detect: skip if exists
 # =========================================================
 echo "=========================================="
-echo "PPO Pretrain Check"
+echo "PPO Pretrain Check (Hierarchical)"
 echo "=========================================="
-if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
-    echo "No pretrained model found. Training PPO for $PRETRAIN_ROUNDS rounds..."
-    python3 -c "
-from pretrain_pipeline import pretrain_ppo, zip_pretrain
-result = pretrain_ppo(
-    n_nodes=$N_NODES,
-    pretrain_rounds=$PRETRAIN_ROUNDS,
-    seed=42,
-    force_retrain=False,
-)
-zip_path = zip_pretrain($PRETRAIN_ROUNDS, 'pretrainppo')
-print(f'Pretrained and zipped to: {zip_path}')
-"
+# Hierarchical pretrain saves to: pretrainppo_hierarchical/{n_nodes}_c{cluster_size}_r{rounds}
+PRETRAIN_HIER_DIR="$PRETRAIN_DIR/hierarchical"
+PRETRAIN_KEY="${N_NODES}_c${CLUSTER_SIZE}_r${PRETRAIN_ROUNDS}"
+
+if [ ! -f "$PRETRAIN_HIER_DIR/$PRETRAIN_KEY/cluster_info.json" ]; then
+    echo "No hierarchical pretrained model found."
+    echo "Training PPO (hierarchical) for $PRETRAIN_ROUNDS rounds..."
+    echo "  k=$((N_NODES / CLUSTER_SIZE)) clusters, a=$CLUSTER_SIZE nodes/cluster"
+    python3 pretrain_hierarchical.py \
+        --rounds $PRETRAIN_ROUNDS \
+        --n_nodes $N_NODES \
+        --cluster_size $CLUSTER_SIZE \
+        --seed 42 \
+        --save_dir $PRETRAIN_HIER_DIR
+    echo "Pretrain complete!"
 else
-    echo "Pretrained model FOUND at $PRETRAIN_DIR/$PRETRAIN_ROUNDS/ - skipping pretrain"
+    echo "Hierarchical pretrained model FOUND at $PRETRAIN_HIER_DIR/$PRETRAIN_KEY/ - skipping pretrain"
 fi
 
 # =========================================================
