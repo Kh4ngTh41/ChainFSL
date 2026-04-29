@@ -40,6 +40,7 @@ from ..haso.agent import HaSOAgentPool
 from ..haso.gossip import HASOGossip
 from ..haso.cluster import ClusterManager
 from ..haso.cluster_agent import ClusterAgentPool
+from ..haso.distributed_ppo import HybridPPOManager, DistributedPPOCoordinator, NodeDecision
 
 from ..tve.commitment import CommitmentVerifier, Proof
 from ..tve.committee import VerificationCommittee, TVEConfig, TieredVerificationEngine
@@ -82,6 +83,10 @@ class RoundMetrics:
     verification_time: float = 0.0
     comm_time: float = 0.0
     avg_node_train_time: float = 0.0  # avg per-node training time
+    # Evaluated per-round metrics (with defaults)
+    f1_macro: float = 0.0
+    precision_macro: float = 0.0
+    recall_macro: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -89,6 +94,9 @@ class RoundMetrics:
             "round_latency": self.round_latency,
             "train_loss": self.train_loss,
             "test_acc": self.test_acc,
+            "f1_macro": self.f1_macro,
+            "precision_macro": self.precision_macro,
+            "recall_macro": self.recall_macro,
             "n_valid_updates": self.n_valid_updates,
             "n_participants": self.n_participants,
             "attack_detection_rate": self.attack_detection_rate,
@@ -242,16 +250,64 @@ class ChainFSLProtocol:
         self._orchestrator = None  # Centralized HASO orchestrator (alternative to per-node agents)
         self.cluster_manager: Optional[ClusterManager] = None
         self.cluster_agent_pool: Optional[ClusterAgentPool] = None
+        self.hybrid_manager: Optional[HybridPPOManager] = None
+
+        # Architecture mode: 'centralized', 'cluster', 'fully_distributed'
+        self.arch_mode = config.get("arch_mode", "cluster")
 
         if self.haso_enabled:
-            # Determine if using hierarchical clusters or per-node agents
+            # Determine architecture mode
             cluster_size = config.get("cluster_size", 0)  # 0 means disabled
-            use_hierarchical = cluster_size > 0 and self.n_nodes % cluster_size == 0
 
-            if use_hierarchical:
+            if self.arch_mode == "fully_distributed":
+                # Fully distributed P2P with gossip coordination
+                print(f"[HASO] Fully Distributed P2P mode: {self.n_nodes} nodes with gossip consensus")
+
+                # Form clusters for gossip routing
+                if cluster_size > 0 and self.n_nodes % cluster_size == 0:
+                    k = self.n_nodes // cluster_size
+                    print(f"       Using cluster_size={cluster_size} for gossip routing (k={k} clusters)")
+
+                    self.cluster_manager = ClusterManager()
+                    self.cluster_manager.form_clusters(
+                        n_nodes=self.n_nodes,
+                        cluster_size=cluster_size,
+                        node_profiles=self.nodes,
+                    )
+                    cluster_members_map = self.cluster_manager.clusters
+                else:
+                    # Default: each node is its own cluster for max P2P
+                    cluster_members_map = {i: [i] for i in range(self.n_nodes)}
+                    self.cluster_manager = None
+
+                # Create per-node agent pool for local PPO decisions
+                self.agent_pool = HaSOAgentPool(
+                    envs=haso_envs,
+                    learning_rate=config.get("ppo_learning_rate", 3e-4),
+                    n_steps=config.get("ppo_n_steps", 512),
+                    batch_size=config.get("ppo_batch_size", 64),
+                    n_epochs=10,
+                    verbose=0,
+                )
+
+                # Create hybrid manager for P2P coordination
+                self.hybrid_manager = HybridPPOManager(
+                    mode='fully_distributed',
+                    node_id=0,
+                    cluster_members=list(range(self.n_nodes)),
+                    gossip=self.gossip,
+                    haso_agent_pool=self.agent_pool,
+                    cluster_agent_pool=None,
+                )
+
+                # Set gossip cluster manager for P2P routing
+                if hasattr(self, 'gossip') and self.cluster_manager:
+                    self.gossip.set_cluster_manager(self.cluster_manager)
+
+            elif self.arch_mode == "cluster" and cluster_size > 0 and self.n_nodes % cluster_size == 0:
                 # Hierarchical MA-HASO: k clusters, a nodes per cluster
                 k = self.n_nodes // cluster_size
-                print(f"[HASO] Hierarchical mode: k={k} clusters, a={cluster_size} nodes/cluster")
+                print(f"[HASO] Hierarchical Cluster mode: k={k} clusters, a={cluster_size} nodes/cluster")
 
                 self.cluster_manager = ClusterManager()
                 self.cluster_manager.form_clusters(
@@ -292,9 +348,10 @@ class ChainFSLProtocol:
                 # Set gossip cluster manager for cluster-aware routing
                 if hasattr(self, 'gossip'):
                     self.gossip.set_cluster_manager(self.cluster_manager)
+
             else:
-                # Original per-node HaSOAgentPool
-                print(f"[HASO] Per-node mode: {self.n_nodes} agents")
+                # Original per-node HaSOAgentPool (no gossip coordination)
+                print(f"[HASO] Per-node mode: {self.n_nodes} agents (no gossip coordination)")
                 self.agent_pool = HaSOAgentPool(
                     envs=haso_envs,
                     learning_rate=config.get("ppo_learning_rate", 3e-4),
@@ -414,22 +471,30 @@ class ChainFSLProtocol:
 
             # Phase 2-3: SFL training + TVE proof generation
             train_start = time.perf_counter()
-            updates, proofs, train_losses = self._phase_training(configs)
+            updates, proofs, train_losses, node_timing = self._phase_training(configs)
             train_elapsed = time.perf_counter() - train_start
 
-            # Per-node train time tracking (from train_losses keys)
-            node_train_times = [train_elapsed] * len(train_losses)
+            # Build WHY explanation for each node's cut decision
+            cut_reasons = self._explain_cut_decisions(configs)
 
-            # Log training results
+            # Log training results with detailed timing per node
             train_details = []
-            for nid, loss in train_losses.items():
-                cfg = configs.get(nid)
-                if cfg:
-                    cut = cfg.get('cut_layer', '?')
-                    target = cfg.get('target_compute_node', '?')
-                    train_details.append(f"N{nid}(L{cut}->T{target}):{loss:.3f}")
+            for nid, timing in node_timing.items():
+                cut = timing.get('cut_layer', '?')
+                t_train = timing.get('t_train', 0)
+                t_tier = timing.get('tier', '?')
+                loss = timing.get('loss', 0)
+                reason = cut_reasons.get(nid, "")
+                train_details.append(f"N{nid}(T{t_tier}:L{cut}:{t_train:.2f}s:{loss:.3f}){reason}")
             if train_details:
-                pbar.write(f"  Round {t} Train: {' | '.join(train_details[:5])}{'...' if len(train_details)>5 else ''}")
+                pbar.write(f"  Round {t} Train: {' | '.join(train_details)}")
+
+            # Log straggler analysis
+            if node_timing:
+                times = [nt['t_train'] for nt in node_timing.values()]
+                mean_t = sum(times) / len(times) if times else 0
+                stragglers = [nid for nid, nt in node_timing.items() if nt['t_train'] > 1.5 * mean_t]
+                pbar.write(f"    Mean: {mean_t:.2f}s | Stragglers ({len(stragglers)}): {[f'N{s}' for s in stragglers]}")
 
             # Phase 4: TVE verification
             verif_start = time.perf_counter()
@@ -493,9 +558,19 @@ class ChainFSLProtocol:
             if t % eval_every == 0 or t == total_rounds:
                 eval_result = self._evaluate()
                 test_acc = eval_result.get("accuracy", 0.0) if isinstance(eval_result, dict) else eval_result
+                f1_macro = eval_result.get("f1_macro", 0.0) if isinstance(eval_result, dict) else 0.0
+                precision = eval_result.get("precision_macro", 0.0) if isinstance(eval_result, dict) else 0.0
+                recall = eval_result.get("recall_macro", 0.0) if isinstance(eval_result, dict) else 0.0
                 metrics.test_acc = test_acc
+                metrics.f1_macro = f1_macro
+                metrics.precision_macro = precision
+                metrics.recall_macro = recall
                 self._log_round(t, metrics)
-                pbar.write(f"  [Round {t}] EVAL: acc={test_acc:.2f}%, loss={metrics.train_loss:.3f}, valid={len(valid_updates)}/{len(updates)}")
+                pbar.write(
+                    f"  [Round {t}] EVAL: acc={test_acc:.2f}%, loss={metrics.train_loss:.3f}, "
+                    f"F1={f1_macro:.3f}, P={precision:.3f}, R={recall:.3f}, "
+                    f"valid={len(valid_updates)}/{len(updates)}"
+                )
 
         pbar.close()
         return self.metrics_history
@@ -537,6 +612,59 @@ class ChainFSLProtocol:
                 return cl
         return None  # No valid cut layer — exclude node
 
+    def _explain_cut_decisions(
+        self, configs: Dict[int, Optional[Dict[str, Any]]]
+    ) -> Dict[int, str]:
+        """
+        Build human-readable explanation for each node's cut_layer decision.
+
+        Args:
+            configs: Dict[node_id] -> config dict from _phase_haso.
+
+        Returns:
+            Dict[node_id] -> reason string explaining WHY cut_layer was chosen.
+        """
+        reasons: Dict[int, str] = {}
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+
+        for node in self.nodes:
+            nid = node.node_id
+            cfg = configs.get(nid)
+
+            if cfg is None:
+                # Check WHY excluded
+                valid_cut = self._find_deepest_valid_cut_layer(node, memory_map)
+                if valid_cut is None:
+                    reasons[nid] = "[EXCLUDED: no cut fits RAM]"
+                else:
+                    reasons[nid] = f"[EXCLUDED: deepest_fit=L{valid_cut}]"
+                continue
+
+            cut_layer = cfg.get("cut_layer", 0)
+            batch_size = cfg.get("batch_size", 32)
+            tier = node.tier
+
+            # Memory reason
+            required = memory_map.get(cut_layer, float("inf"))
+            mem_usage = required / node.ram_mb * 100
+
+            # Build reason string
+            if cut_layer == 1:
+                reason = f"[SHALLOW:{mem_usage:.0f}%RAM]"
+            elif cut_layer == 2:
+                if tier >= 3:
+                    reason = f"[SAFE:tier{tier}]"
+                else:
+                    reason = f"[OPTIMAL:tier{tier}]"
+            elif cut_layer == 3:
+                reason = f"[DEEP:tier{tier}]"
+            else:  # cut_layer == 4
+                reason = f"[DEEPEST:tier{tier}]"
+
+            reasons[nid] = reason
+
+        return reasons
+
     def _phase_haso(self) -> Dict[int, Optional[Dict[str, Any]]]:
         """
         Phase 1: Each node observes state and decides (cut_layer, batch_size, H, target_node).
@@ -560,6 +688,10 @@ class ChainFSLProtocol:
         # Use centralized orchestrator if available (reduces overhead vs per-node agents)
         if self._orchestrator is not None:
             return self._phase_haso_centralized()
+
+        # Use fully distributed P2P mode with gossip coordination
+        if self.hybrid_manager is not None:
+            return self._phase_haso_distributed()
 
         # Use hierarchical cluster agents if available
         if self.cluster_agent_pool is not None:
@@ -719,6 +851,196 @@ class ChainFSLProtocol:
 
         return configs
 
+    def _phase_haso_distributed(self) -> Dict[int, Optional[Dict[str, Any]]]:
+        """
+        Phase 1 (Fully Distributed): Per-node PPO with P2P gossip coordination.
+
+        Each node makes local decision via its own PPO agent.
+        Nodes gossip decisions to cluster neighbors.
+        Consensus reached via reputation-weighted voting.
+
+        This replaces centralized decision-making with P2P coordination.
+
+        Returns:
+            Dict[node_id] -> config dict, or None if node is excluded (OOM).
+        """
+        configs: Dict[int, Optional[Dict[str, Any]]] = {}
+
+        if self.hybrid_manager is None or self.agent_pool is None:
+            # Fallback to per-node
+            return self._phase_haso()
+
+        memory_map = SplittableResNet18.MEMORY_WITH_ADAM_MB
+
+        # Step 1: Collect local observations from all nodes
+        obs_list = []
+        for n in self.nodes:
+            agent = self.agent_pool.agents[n.node_id]
+            obs = agent.env._get_obs()
+            neighbor_avail = self.gossip.mean_neighbor_availability(n.node_id)
+            agent.env._neighbor_avail = neighbor_avail
+            obs_list.append(obs)
+
+        # Step 2: Get local decisions from all agents
+        local_decisions = self.hybrid_manager.decide_all(obs_list, deterministic=False)
+
+        # Step 3: Build consensus decisions with memory validation
+        for n in self.nodes:
+            node_id = n.node_id
+            decision = local_decisions[node_id]
+
+            # Find deepest valid cut layer for this node's memory
+            valid_cut = self._find_deepest_valid_cut_layer(n, memory_map)
+
+            if valid_cut is None:
+                configs[node_id] = None
+                continue
+
+            # Clamp cut_layer to deepest valid
+            cut_layer = decision.get("cut_layer", 2)
+            if cut_layer > valid_cut:
+                cut_layer = valid_cut
+            if cut_layer < 1:
+                cut_layer = 1
+
+            # ============================================================
+            # CRITICAL: In fully distributed P2P, select compute node for SERVER-side layers
+            # The node at (cut_layer+1) to layer4+avgpool+fc must run somewhere
+            #
+            # Strategy: Use gossip to find capable compute node
+            # - If node is Tier-1/2 (high memory), it can compute locally for itself
+            # - If node is Tier-3/4 (low memory), find a high-tier neighbor as compute partner
+            # ============================================================
+            client_tier = n.tier
+            client_cut = cut_layer
+
+            # Memory needed for server-side at this cut_layer
+            # Server-side memory roughly proportional to (4 - cut_layer)
+            server_layers = 4 - cut_layer
+            estimated_server_mem = {
+                1: 525,  # L4 only: 525MB
+                2: 300,  # L3+L4: 300MB
+                3: 150,  # L2+L3+L4: 150MB
+            }.get(server_layers, 200)
+
+            # Determine target_compute_node
+            target_node = decision.get("target_compute_node", None)
+
+            if target_node is None or target_node >= self.n_nodes:
+                # Need to find a compute node via P2P gossip
+                if client_tier <= 2 and n.ram_mb >= estimated_server_mem:
+                    # High-tier node can compute server-side locally
+                    target_node = node_id
+                else:
+                    # Find high-tier neighbor via gossip
+                    best_target = self._find_compute_node_via_gossip(
+                        node_id, client_tier, estimated_server_mem
+                    )
+
+                    if best_target is not None:
+                        target_node = best_target
+                    else:
+                        # CRITICAL FIX: No compute target found!
+                        # Must reduce cut_layer until node can handle server-side itself
+                        # This happens in P2P when all high-tier nodes are busy
+                        original_cut = cut_layer
+                        for fallback_cut in range(cut_layer, 0, -1):
+                            # Recalculate server memory for this cut
+                            fallback_server_layers = 4 - fallback_cut
+                            fallback_server_mem = {
+                                3: 150,  # L2+L3+L4
+                                2: 300,  # L3+L4
+                                1: 525,  # L4 only
+                            }.get(fallback_server_layers, 200)
+
+                            if n.ram_mb >= fallback_server_mem:
+                                cut_layer = fallback_cut
+                                target_node = node_id  # Compute locally
+                                if fallback_cut < original_cut:
+                                    print(f"  [P2P Fallback] Node {node_id}: L{original_cut}→L{fallback_cut} (no compute target)")
+                                break
+                        else:
+                            # No valid cut found - exclude node
+                            configs[node_id] = None
+                            continue
+
+            configs[node_id] = {
+                "cut_layer": cut_layer,
+                "batch_size": decision.get("batch_size", 32),
+                "H": decision.get("H", 1),
+                "target_compute_node": target_node,
+                "arch_mode": "fully_distributed",
+            }
+
+        # Step 4: Broadcast decisions via gossip for next round
+        for node_id, config in configs.items():
+            if config is not None:
+                self.gossip.broadcast_decision(
+                    node_id=node_id,
+                    decision=config,
+                    include_self=True,
+                )
+
+        return configs
+
+    def _find_compute_node_via_gossip(
+        self,
+        requester_id: int,
+        requester_tier: int,
+        required_memory_mb: float,
+    ) -> Optional[int]:
+        """
+        Find a suitable compute node via P2P gossip for server-side layers.
+
+        In fully distributed P2P, we need to find a node that can handle
+        the server-side computation (layers cut_layer+1 to 4 + fc).
+
+        Strategy:
+        1. Query gossip table for neighbors with high reputation
+        2. Filter by memory capacity (tier 1-2 can handle most)
+        3. Return best candidate by reputation
+
+        Args:
+            requester_id: Node requesting compute node.
+            requester_tier: Tier of requesting node.
+            required_memory_mb: Estimated memory needed for server-side.
+
+        Returns:
+            Node ID of best compute node, or None if not found.
+        """
+        if not hasattr(self.gossip, '_protocol'):
+            return None
+
+        table = self.gossip._protocol._table
+        candidates = []
+
+        for nid, info in table.items():
+            if nid == requester_id:
+                continue
+
+            # Check memory capacity via reputation proxy
+            # Higher reputation often means higher tier/capacity
+            reputation = info.get('reputation', 0.5)
+            flops_ratio = info.get('flops_ratio', 0.5)
+            ram_mb = info.get('ram_mb', 512)  # Default assume can handle
+
+            # Must have enough memory
+            if ram_mb < required_memory_mb:
+                continue
+
+            # Score: weighted combination of reputation and compute capacity
+            score = 0.6 * reputation + 0.4 * flops_ratio
+            candidates.append((nid, score))
+
+        if not candidates:
+            return None
+
+        # Return highest scoring candidate
+        best_id, _ = max(candidates, key=lambda x: x[1])
+        return best_id
+
+        return configs
+
     def _get_cluster_obs(self, cluster_nodes: list, env) -> np.ndarray:
         """
         Get cluster-level observation for ClusterHASOAgent.
@@ -829,11 +1151,16 @@ class ChainFSLProtocol:
         Phase 3: Generate TVE proofs (tier-dependent).
 
         Returns:
-            (updates, proofs, train_losses) tuples.
+            (updates, proofs, train_losses, node_timing) tuples.
+            - updates: list of update dicts
+            - proofs: list of TVE proofs
+            - train_losses: Dict[node_id -> loss]
+            - node_timing: Dict[node_id -> {"t_comp", "t_comm", "t_train", "cut_layer", "batch_size", "tier"}]
         """
         updates = []
         proofs = []
         train_losses: Dict[int, float] = {}
+        node_timing: Dict[int, Dict[str, Any]] = {}
         
         # Prevent OpenMP thread explosion (CPU Thrashing) when using ThreadPoolExecutor
         original_threads = torch.get_num_threads()
@@ -922,6 +1249,17 @@ class ChainFSLProtocol:
                 train_losses[node.node_id] = avg_loss
                 self.node_losses[node.node_id] = avg_loss
 
+                # Track per-node timing for straggler analysis
+                node_timing[node.node_id] = {
+                    "t_comp": t_comp,
+                    "t_comm": t_comm,
+                    "t_train": t_comp + t_comm,
+                    "cut_layer": cut_layer,
+                    "batch_size": batch_size,
+                    "tier": node.tier,
+                    "loss": avg_loss,
+                }
+
                 # Broadcast LRH to gossip network (P0 fix: gossip was never broadcast)
                 comp_load = (cut_layer / 4.0) * (batch_size / 32.0)
                 self.gossip.broadcast_lrh(node.node_id, profile=node, current_load=comp_load)
@@ -975,7 +1313,7 @@ class ChainFSLProtocol:
                     self.node_staleness.get(n.node_id, 0) + 1
                 )
 
-        return updates, proofs, train_losses
+        return updates, proofs, train_losses, node_timing
 
     def _generate_proof(
         self,
@@ -1185,6 +1523,12 @@ class ChainFSLProtocol:
             if not is_offline:
                 update_ts = self.cfg.get("ppo_update_timesteps", 256)
                 self._orchestrator.learn(total_timesteps=update_ts)
+        elif self.hybrid_manager is not None:
+            # Fully distributed: per-node PPO with P2P gossip
+            self.hybrid_manager.update_shapley_all(shapley_vals)
+            if not is_offline:
+                update_ts = self.cfg.get("ppo_update_timesteps", 256)
+                self.hybrid_manager.learn_all(total_timesteps=update_ts)
         elif self.cluster_agent_pool is not None:
             # Hierarchical: update each cluster agent
             self._update_cluster_agents_shapley(shapley_vals)
@@ -1357,6 +1701,9 @@ class ChainFSLProtocol:
             f"Round {t:3d}/{total_rounds} | "
             f"Loss: {m.train_loss:.4f} | "
             f"Acc: {m.test_acc:.2f}% | "
+            f"F1: {m.f1_macro:.3f} | "
+            f"P: {m.precision_macro:.3f} | "
+            f"R: {m.recall_macro:.3f} | "
             f"Fairness: {m.fairness_index:.3f} | "
             f"Valid: {m.n_valid_updates}/{m.n_participants} | "
             f"Latency: {m.round_latency:.2f}s | "

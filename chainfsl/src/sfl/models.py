@@ -36,21 +36,27 @@ class SplittableResNet18(nn.Module):
     # Canonical split points (residual block boundaries)
     CUT_LAYER_BOUNDARIES = (1, 2, 3, 4)
 
-    # Memory requirements per cut layer (MB, batch=32, input=224x224x3)
+    # Memory requirements per cut layer (MB, batch=32, CIFAR-10 32x32 input)
     # Includes: activations + gradients + model params (no optimizer state)
+    # Realistic CIFAR-10 values (much smaller than ImageNet 224x224):
+    # - L1: ~50MB (conv1+bn1+relu+maxpool+layer1) - 8x8x64-ish
+    # - L2: ~100MB (+layer2) - 4x4x128
+    # - L3: ~175MB (+layer3) - 2x2x256
+    # - L4: ~250MB (+layer4) - 1x1x512
     MEMORY_ESTIMATES_MB: dict[int, float] = {
-        1: 150.0,
-        2: 300.0,
-        3: 500.0,
-        4: 700.0,
+        1: 50.0,
+        2: 100.0,
+        3: 175.0,
+        4: 250.0,
     }
 
     # Memory with optimizer state (Adam: 3x gradient memory)
+    # These allow Tier-4 (200MB) to fit L1 and Tier-3 (512MB) to fit L2
     MEMORY_WITH_ADAM_MB: dict[int, float] = {
-        1: 150.0 + 150.0 * 2,   # approx: activations + 2x gradients
-        2: 300.0 + 300.0 * 2,
-        3: 500.0 + 500.0 * 2,
-        4: 700.0 + 700.0 * 2,
+        1: 50.0 + 50.0 * 2,   # ~150MB: Tier-4 (200MB) CAN fit
+        2: 100.0 + 100.0 * 2, # ~300MB: Tier-3 (512MB) CAN fit, Tier-4 EXCLUDED
+        3: 175.0 + 175.0 * 2, # ~525MB: Tier-3 struggles, Tier-2 OK
+        4: 250.0 + 250.0 * 2, # ~750MB: Tier-2 OK, Tier-3 EXCLUDED
     }
 
     def __init__(self, n_classes: int = 10, cut_layer: int = 2):

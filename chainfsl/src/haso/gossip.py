@@ -285,3 +285,124 @@ class HASOGossip:
             gossip_protocol: GossipProtocol instance to sync from.
         """
         self._protocol = gossip_protocol
+
+    # ========================================================================
+    # P2P Decision Coordination (for DistributedPPO)
+    # ========================================================================
+
+    MSG_TYPE_DECISION = 'haso_decision'
+    MSG_TYPE_GRADIENT = 'haso_gradient'
+    MSG_TYPE_CONSENSUS = 'haso_consensus'
+
+    def broadcast_decision(
+        self,
+        node_id: int,
+        decision: dict,
+        include_self: bool = True,
+    ) -> None:
+        """
+        Broadcast PPO decision to neighbors (for distributed coordination).
+
+        Args:
+            node_id: Sender node ID.
+            decision: Dict with keys: cut_layer, batch_size, H, target_node.
+            include_self: Whether to store in own entry.
+        """
+        msg = {
+            'type': self.MSG_TYPE_DECISION,
+            'sender_id': node_id,
+            'decision': decision,
+            'timestamp': self._protocol._table.get('_time', 0),
+        }
+
+        if include_self:
+            if node_id not in self._protocol._table:
+                self._protocol._table[node_id] = {}
+            self._protocol._table[node_id]['last_decision'] = decision
+            self._protocol._table[node_id]['decision_msg'] = msg
+
+        # Broadcast to all neighbors via the shared table
+        # (In real P2P, this would send to k neighbors)
+        neighbors = self._protocol.get_neighbors(node_id, k=None)
+        for neighbor_id in neighbors:
+            if neighbor_id != node_id:
+                if neighbor_id not in self._protocol._table:
+                    self._protocol._table[neighbor_id] = {}
+                self._protocol._table[neighbor_id]['last_decision'] = decision
+                self._protocol._table[neighbor_id]['decision_msg'] = msg
+
+    def get_neighbor_decisions(
+        self,
+        node_id: int,
+        horizon: int = 3,
+    ) -> list[dict]:
+        """
+        Get recent decisions from neighbors.
+
+        Args:
+            node_id: Querying node ID.
+            horizon: How many recent decisions to fetch.
+
+        Returns:
+            List of decision dicts from neighbors.
+        """
+        decisions = []
+        table = self._protocol._table
+
+        for nid, info in table.items():
+            if nid == node_id:
+                continue
+            if 'last_decision' in info:
+                decisions.append({
+                    'node_id': nid,
+                    'decision': info['last_decision'],
+                    'reputation': info.get('reputation', 0.5),
+                })
+
+        return decisions
+
+    def broadcast_gradient(
+        self,
+        node_id: int,
+        gradient: dict,
+    ) -> None:
+        """
+        Broadcast gradient update to neighbors (for distributed learning).
+
+        Args:
+            node_id: Sender node ID.
+            gradient: Gradient dict (e.g., {'cut_layer_grad': ...}).
+        """
+        msg = {
+            'type': self.MSG_TYPE_GRADIENT,
+            'sender_id': node_id,
+            'gradient': gradient,
+        }
+
+        if node_id not in self._protocol._table:
+            self._protocol._table[node_id] = {}
+        self._protocol._table[node_id]['last_gradient'] = gradient
+
+        neighbors = self._protocol.get_neighbors(node_id, k=None)
+        for neighbor_id in neighbors:
+            if neighbor_id != node_id:
+                if neighbor_id not in self._protocol._table:
+                    self._protocol._table[neighbor_id] = {}
+                self._protocol._table[neighbor_id]['last_gradient'] = gradient
+
+    def get_neighbor_gradients(self, node_id: int) -> list[dict]:
+        """Get recent gradients from neighbors."""
+        gradients = []
+        table = self._protocol._table
+
+        for nid, info in table.items():
+            if nid == node_id:
+                continue
+            if 'last_gradient' in info:
+                gradients.append({
+                    'node_id': nid,
+                    'gradient': info['last_gradient'],
+                    'reputation': info.get('reputation', 0.5),
+                })
+
+        return gradients

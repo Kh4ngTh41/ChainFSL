@@ -158,10 +158,24 @@ Examples:
         help="Directory containing pretrained models (default: pretrainppo)",
     )
     parser.add_argument(
+        "--arch_mode",
+        type=str,
+        default="cluster",
+        choices=["centralized", "cluster", "fully_distributed"],
+        help="HASO architecture mode: centralized (1 PPO for all), cluster (PPO per cluster), fully_distributed (PPO per node via P2P gossip)",
+    )
+    parser.add_argument(
         "--cluster_size",
         type=int,
         default=0,
         help="Nodes per cluster for hierarchical HASO (e.g., 5). 0=disabled (default per-node agents). Must divide n_nodes evenly.",
+    )
+    parser.add_argument(
+        "--tier_dist",
+        type=str,
+        default="balanced",
+        choices=["iot_heavy", "balanced", "gpu_heavy", "uniform"],
+        help="Tier distribution for E1 experiment (default: balanced)",
     )
     parser.add_argument(
         "--offline_haso",
@@ -206,6 +220,7 @@ def run_exp(exp_name: str, args) -> None:
         config["lazy_client_fraction"] = args.lazy_fraction
     if args.cluster_size is not None and args.cluster_size > 0:
         config["cluster_size"] = args.cluster_size
+    config["arch_mode"] = getattr(args, "arch_mode", "cluster")
     config["seed"] = args.seed
     config["log_dir"] = args.log_dir
     config["offline_haso"] = getattr(args, "offline_haso", False)
@@ -295,6 +310,7 @@ def run_exp(exp_name: str, args) -> None:
     if exp_name == "e1":
         module.run(
             config,
+            tier_dist=args.tier_dist,
             skip_baselines=getattr(args, "skip_baselines", False),
             resume=args.resume,
             checkpoint_dir=args.checkpoint_dir,

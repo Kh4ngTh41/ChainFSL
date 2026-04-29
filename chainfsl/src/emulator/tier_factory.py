@@ -144,6 +144,56 @@ DEFAULT_DISTRIBUTION = TierDistribution(
 DEFAULT_FACTORY = TierFactory(distribution=DEFAULT_DISTRIBUTION, seed=42)
 
 
+# =============================================================================
+# E1 Experiment Tier Distribution Scenarios (4 × 2 methods design)
+# =============================================================================
+
+TIER_DISTRIBUTIONS = {
+    # IoT-heavy: Many weak devices (ESP32, RPi Zero) - realistic IoT scenario
+    # Straggler problem is most severe here
+    "iot_heavy": TierDistribution(
+        tiers=[1, 2, 3, 4],
+        probabilities=[0.05, 0.10, 0.35, 0.50],  # 50% tier4, 35% tier3
+    ),
+
+    # Balanced: Default distribution
+    "balanced": TierDistribution(
+        tiers=[1, 2, 3, 4],
+        probabilities=[0.10, 0.30, 0.40, 0.20],
+    ),
+
+    # GPU-heavy: Many powerful devices (Jetson, Desktop GPU)
+    "gpu_heavy": TierDistribution(
+        tiers=[1, 2, 3, 4],
+        probabilities=[0.30, 0.35, 0.25, 0.10],  # 30% tier1, 35% tier2
+    ),
+
+    # Uniform: Equal representation of all tiers
+    "uniform": TierDistribution(
+        tiers=[1, 2, 3, 4],
+        probabilities=[0.25, 0.25, 0.25, 0.25],
+    ),
+}
+
+
+def get_tier_distribution(name: str) -> TierDistribution:
+    """
+    Get tier distribution by name for E1 experiment.
+
+    Args:
+        name: One of ["iot_heavy", "balanced", "gpu_heavy", "uniform"]
+
+    Returns:
+        TierDistribution instance.
+
+    Raises:
+        KeyError: If name not found in TIER_DISTRIBUTIONS.
+    """
+    if name not in TIER_DISTRIBUTIONS:
+        raise KeyError(f"Unknown tier distribution '{name}'. Available: {list(TIER_DISTRIBUTIONS.keys())}")
+    return TIER_DISTRIBUTIONS[name]
+
+
 def create_nodes(n: int, distribution: Optional[Union[TierDistribution, TierFactory]] = None) -> List[HardwareProfile]:
     """
     Convenience function to create N nodes using default distribution.
