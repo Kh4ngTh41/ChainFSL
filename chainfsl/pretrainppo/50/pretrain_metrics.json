@@ -1,0 +1,11 @@
+{
+  "pretrain_rounds": 50,
+  "n_nodes": 20,
+  "seed": 42,
+  "elapsed_seconds": 37755.43969843909,
+  "final_round": 50,
+  "final_loss": 0.21885214720292448,
+  "final_acc": 75.76,
+  "mean_latency": 46.473125254251066,
+  "timestamp": "2026-04-30T08:29:41.033843"
+}
