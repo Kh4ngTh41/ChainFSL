@@ -325,15 +325,17 @@ def run_exp(exp_name: str, args) -> None:
         print(f"\n{'#'*60}")
         print(f"# Running baseline: {args.baseline}")
         print(f"{'#'*60}")
-        metrics = baseline_run(
-            config=config,
-            method=method,
-            cluster_ratio=args.cluster_ratio,
-            pretrained_orchestrator=pretrained_orchestrator,
-            cluster_agent_pool=cluster_agent_pool,
-            pretrain_dir=args.pretrain_dir,
-        )
-        print(f"[{args.baseline}] Done! Rounds: {len(metrics)}, Final acc: {metrics[-1].get('test_acc', 0):.2f}%")
+        try:
+            metrics = baseline_run(
+                config=config,
+                method=method,
+                cluster_ratio=args.cluster_ratio,
+                verbose=True,
+            )
+            print(f"[{args.baseline}] Done! Rounds: {len(metrics)}, Final acc: {metrics[-1].get('test_acc', 0):.2f}%")
+        except Exception as e:
+            print(f"[{args.baseline}] ERROR: {e}")
+            raise
         return  # Exit early — don't run ChainFSL module
 
     # Dispatch
