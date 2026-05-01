@@ -260,8 +260,17 @@ class HybridPPOManager:
                 cluster_members=cluster_members,
                 gossip=gossip,
             )
+        elif mode == 'federated_rl':
+            from .federated_rl import FederatedRLCoordinator
+            self._coordinator = FederatedRLCoordinator(
+                node_id=node_id,
+                cluster_members=cluster_members,
+                gossip=gossip,
+            )
+            self._federated_rl = True
         else:
             self._coordinator = None
+            self._federated_rl = False
 
         self.haso_pool = haso_agent_pool
         self.cluster_pool = cluster_agent_pool
@@ -285,6 +294,8 @@ class HybridPPOManager:
             return self._decide_distributed(obs_list, deterministic)
         elif self.mode == 'cluster':
             return self._decide_cluster(obs_list, deterministic)
+        elif self.mode == 'federated_rl':
+            return self._decide_federated_rl(obs_list, deterministic)
         else:
             return self._decide_centralized(obs_list, deterministic)
 
@@ -369,6 +380,26 @@ class HybridPPOManager:
         for dec in decisions:
             dec['mode'] = 'per_node_local'
         return decisions
+
+    def _decide_federated_rl(
+        self,
+        obs_list: List[np.ndarray],
+        deterministic: bool,
+    ) -> List[Dict[str, Any]]:
+        """Per-node PPO with Federated RL policy sharing every 5 rounds."""
+        if self.haso_pool is None:
+            raise ValueError("haso_agent_pool required for federated_rl mode")
+
+        # Step 1: Get per-node decisions
+        local_decisions = self.haso_pool.decide_all(obs_list, deterministic)
+
+        # Step 2: Update Shapley values if available
+        # (Shapley values come from GTM in the real protocol)
+
+        # Step 3: Return local decisions (gossip happens in protocol layer)
+        for dec in local_decisions:
+            dec['mode'] = 'federated_rl'
+        return local_decisions
 
     def _get_reputation(self, node_id: int) -> float:
         """Get reputation for a node from gossip table."""
