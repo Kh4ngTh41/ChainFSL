@@ -47,6 +47,10 @@ class HaSOAgent:
         self.env = env
         self.node_id = node_id
 
+        # Force CPU device to avoid GPU memory issues with MLP policies
+        import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
         self.model = PPO(
             policy="MlpPolicy",
             env=env,
@@ -61,6 +65,8 @@ class HaSOAgent:
             verbose=verbose,
             # Use a separate seed per agent
             seed=node_id,
+            # Force CPU device
+            device="cpu",
         )
 
     def decide(self, obs: np.ndarray, deterministic: bool = False) -> Dict[str, Any]:
