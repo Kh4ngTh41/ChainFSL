@@ -188,6 +188,19 @@ Examples:
         default="auto",
         help="Device to run PPO on (e.g. cpu, cuda, auto)",
     )
+    parser.add_argument(
+        "--baseline",
+        type=str,
+        default=None,
+        choices=["fedavg", "splitfed_v1", "splitfed_v2"],
+        help="Run a specific baseline instead of ChainFSL",
+    )
+    parser.add_argument(
+        "--cluster_ratio",
+        type=float,
+        default=0.2,
+        help="Node per cluster ratio (0.10, 0.20, 0.30)",
+    )
     return parser.parse_args()
 
 
@@ -303,6 +316,25 @@ def run_exp(exp_name: str, args) -> None:
             print(f"[{exp_name}] Resuming from checkpoint: {checkpoint_path}")
         else:
             print(f"[{exp_name}] No checkpoint found in {args.checkpoint_dir}, starting fresh")
+
+    # Add near the top of run_exp(), before calling module.run()
+    if args.baseline:
+        # Run baseline instead of ChainFSL
+        from experiments.e1_baseline_comparison import run as baseline_run
+        method = args.baseline
+        print(f"\n{'#'*60}")
+        print(f"# Running baseline: {args.baseline}")
+        print(f"{'#'*60}")
+        metrics = baseline_run(
+            config=config,
+            method=method,
+            cluster_ratio=args.cluster_ratio,
+            pretrained_orchestrator=pretrained_orchestrator,
+            cluster_agent_pool=cluster_agent_pool,
+            pretrain_dir=args.pretrain_dir,
+        )
+        print(f"[{args.baseline}] Done! Rounds: {len(metrics)}, Final acc: {metrics[-1].get('test_acc', 0):.2f}%")
+        return  # Exit early — don't run ChainFSL module
 
     # Dispatch
     module = EXPERIMENT_MAP[exp_name]
