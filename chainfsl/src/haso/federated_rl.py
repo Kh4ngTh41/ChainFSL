@@ -44,12 +44,15 @@ class FederatedRLCoordinator:
     def federated_aggregate(
         self, agent_weights: Dict[int, np.ndarray], shapley_values: Dict[int, float]
     ) -> np.ndarray:
-        total_shapley = sum(shapley_values.values())
-        if total_shapley == 0:
-            total_shapley = len(agent_weights)
+        original_total = sum(shapley_values.values())
+        use_fallback = original_total == 0
+        total_shapley = original_total if original_total != 0 else len(agent_weights)
         aggregated = None
         for node_id, weights in agent_weights.items():
-            phi = shapley_values.get(node_id, 1.0)
+            if use_fallback:
+                phi = 1.0
+            else:
+                phi = shapley_values.get(node_id, 1.0)
             w = phi / total_shapley
             if aggregated is None:
                 aggregated = w * weights
@@ -70,6 +73,8 @@ class FederatedRLCoordinator:
             )
             self._intra_weights[self.node_id] = pw
         else:
+            if not self.cluster_members:
+                return
             if self.gossip is not None and hasattr(self.gossip, "_protocol"):
                 cluster_head = self.cluster_members[0] if self.cluster_members else None
                 if cluster_head is not None:
