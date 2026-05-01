@@ -59,30 +59,30 @@ class ClusterManager:
 
         Returns:
             Dict mapping cluster_id → [node_ids]
-
-        Raises:
-            ValueError: If n_nodes not divisible by cluster_size.
         """
+        import math
+
+        # Auto-adjust: if n_nodes % cluster_size != 0
         if n_nodes % cluster_size != 0:
-            raise ValueError(
-                f"n_nodes={n_nodes} not divisible by cluster_size={cluster_size}. "
-                f"Need n_nodes = k * cluster_size for integer k."
-            )
+            k = math.ceil(n_nodes / cluster_size)
+            cluster_size = math.ceil(n_nodes / k)
+            print(f"[ClusterManager] Auto-adjusted cluster_size: {cluster_size} for N={n_nodes}")
 
         self.cluster_size = cluster_size
         self.n_clusters = n_nodes // cluster_size
-        self.clusters = {}
+        remaining = n_nodes % cluster_size
 
-        # Distribute nodes round-robin to clusters
-        # Cluster 0: [0, k, 2k, ...]
-        # Cluster 1: [1, k+1, 2k+1, ...]
-        # etc.
+        self.clusters = {}
         for c in range(self.n_clusters):
-            self.clusters[c] = [
-                c + (i * self.n_clusters)
-                for i in range(cluster_size)
-                if c + (i * self.n_clusters) < n_nodes
-            ]
+            start = c * cluster_size
+            end = start + cluster_size
+            self.clusters[c] = list(range(start, min(end, n_nodes)))
+
+        # Distribute remaining nodes across first 'remaining' clusters
+        if remaining > 0:
+            for c in range(remaining):
+                self.clusters[c].append(n_nodes - remaining + c)
+            self.n_clusters = math.ceil(n_nodes / cluster_size)
 
         # Elect cluster-head for each cluster
         self._elect_cluster_heads(node_profiles)
