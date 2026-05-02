@@ -4,11 +4,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=mps:2
+#SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --time=72:00:00
 #SBATCH --output=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.out
 #SBATCH --error=/home/uitchain/datastore/khang/ChainFSL/logs/full_%j.err
+
+set -euo pipefail
 
 # =========================================================
 # FULL EXPERIMENT SUITE - All 7 experiments
@@ -19,54 +21,98 @@ REQUIRED_VRAM=30000
 N_NODES=20
 GLOBAL_ROUNDS=50
 CLUSTER_SIZE=5
-PRETRAIN_ROUNDS=500
+PRETRAIN_ROUNDS=50
+OFFLINE_HASO=1
+PPO_DEVICE=cpu
+PRETRAIN_LOAD_TIMEOUT=120
+REQUIRE_CUDA=1
+SETUP_ONCE=1
 VENV_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/.venv"
 REQ_FILE="/home/uitchain/datastore/khang/ChainFSL/chainfsl/requirements.txt"
 PRETRAIN_DIR="/home/uitchain/datastore/khang/ChainFSL/chainfsl/pretrainppo"
 
+if [ "$OFFLINE_HASO" -eq 1 ]; then
+    OFFLINE_ARG="--offline_haso"
+    echo "HASO mode: OFFLINE (pretrained PPO inference only, PPO_DEVICE=$PPO_DEVICE)"
+else
+    OFFLINE_ARG=""
+    echo "HASO mode: ONLINE (PPO updates during experiment, PPO_DEVICE=$PPO_DEVICE)"
+fi
+
 module load python312
+echo "[SLURM SCRIPT] chainfsl run_all v2026-04-26-import-probe"
 
-pip3 install -r $REQ_FILE
-unset CUDA_VISIBLE_DEVICES
+if [ ! -d "$VENV_DIR" ]; then
+    python3 -m venv "$VENV_DIR"
+fi
+source "$VENV_DIR/bin/activate"
+export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
+export PYTORCH_NVML_BASED_CUDA_CHECK=1
+# export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" (moved down to probe loop)
 
-CHECK_OUT=$(/usr/local/bin/gpu_check.sh $REQUIRED_VRAM $SLURM_JOB_ID)
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 10 ]; then echo "$CHECK_OUT"; exit 0
-elif [ $EXIT_CODE -eq 11 ]; then echo "$CHECK_OUT"; exit 1; fi
-BEST_GPU=$CHECK_OUT
-echo "✅ GPU: $BEST_GPU"
+if [ "$SETUP_ONCE" -eq 1 ] && [ -f "$VENV_DIR/.chainfsl_env_ready" ]; then
+    echo "[ENV] Reusing existing .venv dependencies (setup-once marker found)."
+else
+    echo "[ENV] Installing/updating dependencies in .venv..."
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install -r $REQ_FILE
+    touch "$VENV_DIR/.chainfsl_env_ready"
+fi
+echo "Requested 1 GPU via SLURM. PPO/ChainFSL will use CUDA if torch can initialize it."
 
-export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps-job$SLURM_JOB_ID
-export CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-mps-log-job$SLURM_JOB_ID
-rm -rf $CUDA_MPS_PIPE_DIRECTORY $CUDA_MPS_LOG_DIRECTORY
-mkdir -p $CUDA_MPS_PIPE_DIRECTORY $CUDA_MPS_LOG_DIRECTORY
-export CUDA_VISIBLE_DEVICES=$BEST_GPU
+echo "[STEP] Probing for a healthy GPU to bypass CUDA deadlocks (Max 7s per GPU)..."
+export CUDA_VISIBLE_DEVICES="-1"
+HEALTHY_GPU=-1
+
+for i in {0..7}; do
+    echo -n "  Testing GPU $i..."
+    # Isolate strictly to one GPU and try to allocate a tensor
+    if timeout 7s python -c "
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = str($i)
+import torch
+torch.zeros(1).cuda()
+" >/dev/null 2>&1; then
+        HEALTHY_GPU=$i
+        echo " OK!"
+        break
+    else
+        echo " DEADLOCKED/FAILED. Skipping."
+    fi
+done
+
+if [ "$HEALTHY_GPU" -eq -1 ]; then
+    echo "[WARN] No healthy GPU found! Forcing PyTorch to CPU mode to avoid deadlocks."
+    export CUDA_VISIBLE_DEVICES=""
+    export REQUIRE_CUDA=0
+else
+    echo "[STEP] Found healthy GPU: $HEALTHY_GPU. Locking down job to this GPU."
+    export CUDA_VISIBLE_DEVICES="$HEALTHY_GPU"
+fi
+
+if [ "$REQUIRE_CUDA" -eq 1 ]; then
+    echo "[STEP] CUDA logic validated; proceeding directly to experiment launch."
+fi
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
 # =========================================================
-# PRETRAIN PPO - Hierarchical, auto-detect: skip if exists
+# PRETRAIN PPO - Auto-detect: skip if exists
 # =========================================================
 echo "=========================================="
-echo "PPO Pretrain Check (Hierarchical)"
+echo "PPO Pretrain Check"
 echo "=========================================="
-# Hierarchical pretrain saves to: pretrainppo_hierarchical/{n_nodes}_c{cluster_size}_r{rounds}
-PRETRAIN_HIER_DIR="$PRETRAIN_DIR/hierarchical"
-PRETRAIN_KEY="${N_NODES}_c${CLUSTER_SIZE}_r${PRETRAIN_ROUNDS}"
-
-if [ ! -f "$PRETRAIN_HIER_DIR/$PRETRAIN_KEY/cluster_info.json" ]; then
-    echo "No hierarchical pretrained model found."
-    echo "Training PPO (hierarchical) for $PRETRAIN_ROUNDS rounds..."
-    echo "  k=$((N_NODES / CLUSTER_SIZE)) clusters, a=$CLUSTER_SIZE nodes/cluster"
-    python3 pretrain_hierarchical.py \
+if [ ! -f "$PRETRAIN_DIR/$PRETRAIN_ROUNDS/orchestrator.zip" ]; then
+    echo "No pretrained model found. Training PPO offline for $PRETRAIN_ROUNDS rounds..."
+    python -u pretrain_pipeline.py \
         --rounds $PRETRAIN_ROUNDS \
         --n_nodes $N_NODES \
-        --cluster_size $CLUSTER_SIZE \
         --seed 42 \
-        --save_dir $PRETRAIN_HIER_DIR
-    echo "Pretrain complete!"
+        --ppo_device $PPO_DEVICE \
+        --log_dir ./logs
 else
-    echo "Hierarchical pretrained model FOUND at $PRETRAIN_HIER_DIR/$PRETRAIN_KEY/ - skipping pretrain"
+    echo "Pretrained model FOUND at $PRETRAIN_DIR/$PRETRAIN_ROUNDS/ - skipping pretrain"
 fi
 
 # =========================================================
@@ -75,13 +121,28 @@ fi
 echo "=========================================="
 echo "Running E1: HASO Effectiveness"
 echo "=========================================="
-python experiments/run_experiment.py \
+echo "[STEP] Probing Python import path for experiments runner (timeout 120s)..."
+if ! timeout 120s python -u -X faulthandler - << 'PY'
+print("[PROBE] import experiments.run_experiment ...", flush=True)
+import experiments.run_experiment
+print("[PROBE] import experiments.run_experiment OK", flush=True)
+PY
+then
+    echo "[FATAL] Python import probe failed or timed out before E1 launch."
+    exit 3
+fi
+
+echo "[STEP] Launching E1 command..."
+python -u experiments/run_experiment.py \
     --exp e1 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --skip_baselines \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
@@ -92,13 +153,16 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E2: Scalability"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e2 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -108,7 +172,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E3: Non-IID Data"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e3 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -116,6 +180,9 @@ python experiments/run_experiment.py \
     --alpha 0.1 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -125,7 +192,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E4: Security"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e4 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -133,6 +200,9 @@ python experiments/run_experiment.py \
     --lazy_fraction 0.2 \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -142,13 +212,16 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E5: Incentive Mechanism"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e5 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -158,7 +231,7 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E6: Ablation Study"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e6 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
@@ -166,6 +239,9 @@ python experiments/run_experiment.py \
     --ablation full \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
 
@@ -175,17 +251,18 @@ python experiments/run_experiment.py \
 echo "=========================================="
 echo "Running E7: Blockchain Overhead"
 echo "=========================================="
-python experiments/run_experiment.py \
+python -u experiments/run_experiment.py \
     --exp e7 \
     --n_nodes $N_NODES \
     --global_rounds $GLOBAL_ROUNDS \
     --cluster_size $CLUSTER_SIZE \
     --pretrain_rounds $PRETRAIN_ROUNDS \
     --pretrain_dir $PRETRAIN_DIR \
+    --pretrain_load_timeout $PRETRAIN_LOAD_TIMEOUT \
+    --ppo_device $PPO_DEVICE \
+    $OFFLINE_ARG \
     --log_dir ./logs \
     --checkpoint_dir ./checkpoints
-
-echo "quit" | nvidia-cuda-mps-control
 echo "=========================================="
 echo "All experiments completed!"
 echo "=========================================="

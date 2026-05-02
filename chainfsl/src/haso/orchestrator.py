@@ -342,18 +342,31 @@ class OrchestratorEnv(gym.Env):
 
         return configs
 
-    def _compute_global_reward(self, configs: List[Dict[str, Any]]) -> float:
+    def _compute_global_reward(self, configs: List[Dict[str, Any]], node_tiers: List[int] = None) -> float:
         """
         Compute global reward based on all node configurations.
 
-        Reward = -alpha * mean_T_comp - beta * mean_T_comm + gamma * shapley * delta_F
+        Reward = -alpha * mean_T_comp - beta * mean_T_comm + gamma * shapley * delta_F - eta_H * mean(H_penalty)
+
+        CRITICAL FIX: Tier-aware H penalty.
+        Strong nodes (tier 1) can use higher H without penalty.
+        Weak nodes (tier 4) are penalized for H > 1.
         """
         total_T_comp = 0.0
         total_T_comm = 0.0
+        total_H_penalty = 0.0
 
-        for cfg in configs:
+        eta_H = 1.5  # H penalty coefficient
+        H_ref_by_tier = {1: 4, 2: 3, 3: 2, 4: 1}  # Tier-aware H reference
+
+        for i, cfg in enumerate(configs):
             cut_layer = cfg["cut_layer"]
             batch_size = cfg["batch_size"]
+            H = cfg.get("H", 1)
+
+            # Determine tier for this node
+            tier = node_tiers[i] if node_tiers and i < len(node_tiers) else 2
+            H_ref = H_ref_by_tier.get(tier, 2)
 
             # Estimate computation time
             base_flops = 1e8 * (cut_layer / 4.0) * (batch_size / 32.0)
@@ -369,12 +382,17 @@ class OrchestratorEnv(gym.Env):
             total_T_comp += T_comp
             total_T_comm += T_comm
 
-        mean_T_comp = total_T_comp / max(len(configs), 1)
-        mean_T_comm = total_T_comm / max(len(configs), 1)
+            # Tier-aware H penalty
+            total_H_penalty += eta_H * max(0, H - H_ref)
 
-        # Reward formula
+        n = max(len(configs), 1)
+        mean_T_comp = total_T_comp / n
+        mean_T_comm = total_T_comm / n
+        mean_H_penalty = total_H_penalty / n
+
+        # Reward formula with tier-aware H penalty
         delta_F = max(0.0, self._mean_loss - (self._mean_loss * 0.95))
-        reward = -self.alpha * mean_T_comp - self.beta * mean_T_comm + self.gamma * self._shapley_ema * delta_F
+        reward = -self.alpha * mean_T_comp - self.beta * mean_T_comm + self.gamma * self._shapley_ema * delta_F - mean_H_penalty
 
         return float(reward)
 

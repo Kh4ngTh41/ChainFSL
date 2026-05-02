@@ -4,13 +4,20 @@ import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import MultiDiscrete, Box
 
-STATE_LOW = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-STATE_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 10.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+# 11 original features + 4 tier one-hot + 1 relative compute power = 16 dims
+STATE_LOW = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0])
+STATE_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 10.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                       1.0, 1.0, 1.0, 1.0, 5.0])
 
 STATE_NAMES = [
     'cpu_util', 'ram_util', 'gpu_util', 'bandwidth',
     'current_loss', 'loss_std', 'neighbor_avail',
-    'compute_queue', 'fusion_candidates', 'energy_ratio', 'shard_available'
+    'compute_queue', 'fusion_candidates', 'energy_ratio', 'shard_available',
+    # Tier one-hot encoding (4 features)
+    'tier1', 'tier2', 'tier3', 'tier4',
+    # Relative compute power
+    'relative_compute'
 ]
 
 CUT_LAYERS = [1, 2, 3, 4]
@@ -40,10 +47,12 @@ class StateBuilder:
         compute_queue,
         fusion_candidates,
         energy_ratio,
-        shard_available
+        shard_available,
+        node_tier: int = 2,
+        ref_flops: float = 1.0,
     ):
         """
-        Build 11-dim normalized state vector.
+        Build 16-dim normalized state vector (11 original + 4 tier one-hot + 1 compute ratio).
 
         Args:
             profile: dict with cpu_util, ram_util, gpu_util, bandwidth
@@ -54,11 +63,14 @@ class StateBuilder:
             fusion_candidates: number of fusion candidates [0, 1]
             energy_ratio: energy consumption ratio [0, 1]
             shard_available: fraction of available shards [0, 1]
+            node_tier: hardware tier (1-4) for tier-aware decision making
+            ref_flops: reference FLOPs ratio for normalization (default 1.0 for tier1)
 
         Returns:
-            np.array: 11-dim normalized state vector
+            np.array: 16-dim normalized state vector
         """
-        state = np.array([
+        # Base 11 features
+        base_features = [
             profile.get('cpu_util', 0.0),
             profile.get('ram_util', 0.0),
             profile.get('gpu_util', 0.0),
@@ -70,8 +82,23 @@ class StateBuilder:
             fusion_candidates,
             energy_ratio,
             shard_available
-        ], dtype=np.float32)
+        ]
 
+        # Tier one-hot encoding (4 features)
+        tier_onehot = [0.0, 0.0, 0.0, 0.0]
+        if 1 <= node_tier <= 4:
+            tier_onehot[node_tier - 1] = 1.0
+
+        # Relative compute power (normalized to tier1 = 1.0)
+        flops_ratio = profile.get('flops_ratio', 1.0)
+        relative_compute = min(5.0, flops_ratio / max(ref_flops, 0.1))
+
+        state = np.array(
+            base_features + tier_onehot + [relative_compute],
+            dtype=np.float32
+        )
+
+        # Normalize to [0, 1] using state bounds
         normalized = np.clip(
             (state - self.state_low) / (self.state_high - self.state_low),
             0.0, 1.0

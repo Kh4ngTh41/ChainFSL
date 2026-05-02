@@ -62,9 +62,11 @@ class SFLNodeEnv(gym.Env):
     BATCH_SIZES = [8, 16, 32, 64]
     H_CHOICES = [1, 2, 3, 5]
 
-    # State bounds (low, high) - 11 dimensions
-    STATE_LOW = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-    STATE_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 10.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    # State bounds (low, high) - 16 dimensions (11 base + 4 tier + 1 compute ratio)
+    STATE_LOW = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                          0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    STATE_HIGH = np.array([1.0, 1.0, 1.0, 1.0, 10.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                           1.0, 1.0, 1.0, 1.0, 5.0], dtype=np.float32)
 
     def __init__(
         self,
@@ -344,6 +346,8 @@ class SFLNodeEnv(gym.Env):
         delta_F = max(0.0, self._loss_ema - performance_gain)
 
         # Compute reward with new RewardFunction
+        # CRITICAL FIX: Pass tier-aware H penalty and node capability
+        node_tier = getattr(self.profile, 'tier', 2)
         reward = self.reward_function.compute(
             T_comp=T_comp,
             T_comm=T_comm,
@@ -351,7 +355,9 @@ class SFLNodeEnv(gym.Env):
             shapley_phi=self._shapley_ema,
             fusion_bonus=fusion_bonus,
             overlap_penalty=overlap_penalty,
-            current_accuracy=1.0 - performance_gain  # approx accuracy
+            H=H,  # Pass local epochs for penalty computation
+            current_accuracy=1.0 - performance_gain,  # approx accuracy
+            node_tier=node_tier,  # Tier-aware H penalty
         )
 
         # Update internal state
@@ -425,13 +431,14 @@ class SFLNodeEnv(gym.Env):
     # --------------------------------------------------------------------- #
 
     def _get_obs(self) -> np.ndarray:
-        """Build normalized 11-dim observation vector using StateBuilder."""
+        """Build normalized 16-dim observation vector (11 base + 4 tier + 1 compute ratio)."""
         # Build profile dict for StateBuilder
         profile_dict = {
             'cpu_util': self.profile.flops_ratio,
             'ram_util': 1.0 - (self.profile.ram_mb / 8192.0),
             'gpu_util': getattr(self.profile, 'gpu_util', 0.5),
             'bandwidth': self.profile.bandwidth_mbps / 100.0,
+            'flops_ratio': self.profile.flops_ratio,
         }
 
         # Neighbor availability from gossip
@@ -444,7 +451,10 @@ class SFLNodeEnv(gym.Env):
             budget = getattr(self.profile, 'energy_budget', 1000.0)
             energy_ratio = self.profile.energy_remaining / max(budget, 1.0)
 
-        # Use StateBuilder to create normalized 11-dim state
+        # Get tier for tier-aware state encoding
+        node_tier = getattr(self.profile, 'tier', 2)
+
+        # Use StateBuilder to create normalized 16-dim state (with tier info)
         state = self.state_builder.build_state(
             profile=profile_dict,
             loss_ema=self._loss_ema,
@@ -453,7 +463,9 @@ class SFLNodeEnv(gym.Env):
             compute_queue=self._compute_queue,
             fusion_candidates=self._fusion_candidates,
             energy_ratio=energy_ratio,
-            shard_available=self._shard_available
+            shard_available=self._shard_available,
+            node_tier=node_tier,
+            ref_flops=1.0,  # Tier 1 reference
         )
 
         self._state = state
@@ -538,8 +550,13 @@ class SFLNodeEnv(gym.Env):
         batch_factor = min(1.0, batch_size / 32.0)
 
         # H effect: more local epochs → better local model but risk overfitting
-        H_factor = np.log(H + 1) / np.log(6.0)
-        H_factor = min(1.0, H_factor)
+        # CRITICAL FIX: Use LINEAR penalty, not logarithmic
+        # log(H+1)/log(6) for H=5 → 1.0 (full benefit, no penalty awareness)
+        # Linear: H=1 → 0.33, H=2 → 0.67, H=3 → 1.0, H=5 → 1.67
+        # But we also penalize in reward, so here we just cap the benefit
+        # H_factor = np.log(H + 1) / np.log(6.0)  # OLD: too lenient
+        # New: cap H_factor at 1.5 to prevent over-estimation of H benefit
+        H_factor = min(1.5, (H / 4.0))  # H=5 → 1.25, H=3 → 0.75, H=1 → 0.25
 
         # Loss improvement per step (simplified convergence)
         improvement = (0.3 + 0.2 * self._neighbor_avail) * cut_factor * batch_factor * H_factor

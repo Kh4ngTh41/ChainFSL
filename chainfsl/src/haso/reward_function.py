@@ -13,11 +13,13 @@ REF_GFLOPS = 1.0
 
 @dataclass
 class RewardConfig:
-    alpha: float = 2.0
-    beta: float = 1.5
-    gamma: float = 0.5
-    lambda_fusion: float = 0.3
-    mu_overlap: float = 0.4
+    alpha: float = 2.0          # Weight for computation time penalty
+    beta: float = 1.5           # Weight for communication time penalty
+    gamma: float = 0.5          # Weight for Shapley-based reward
+    lambda_fusion: float = 0.3 # Weight for fusion bonus
+    mu_overlap: float = 0.4    # Weight for overlap penalty
+    eta_H: float = 1.5          # CRITICAL: Penalty coefficient for local epochs H
+    H_reference: int = 2        # Reference H value (baseline for penalty calculation)
     min_acc_threshold: float = 0.60
 
 
@@ -33,20 +35,39 @@ class RewardFunction:
         shapley_phi: float,
         fusion_bonus: float,
         overlap_penalty: float,
-        current_accuracy: float
+        H: int,
+        current_accuracy: float,
+        node_tier: int = 2,
     ) -> float:
         """
         Compute total reward:
-        R = -α·T_comp - β·T_comm + γ·φ·ΔF + λ·fusion_bonus - μ·overlap_penalty
-        If accuracy < min_acc_threshold: R -= 10.0
+        R = -α·T_comp - β·T_comm + γ·φ·ΔF + λ·fusion_bonus - μ·overlap_penalty - η·H_penalty(tier)
+
+        The H penalty is TIER-AWARE:
+        - Tier 1 (strong GPU): H_ref=4, penalty only for H>4 (almost never)
+        - Tier 2 (mid CPU): H_ref=3, penalty for H>3
+        - Tier 3 (IoT): H_ref=2, penalty for H>2 (standard)
+        - Tier 4 (RPi weak): H_ref=1, strict penalty for H>1
+
+        This incentivizes strong nodes to do more local epochs (more init/model quality)
+        while weak nodes are constrained to fewer epochs.
         """
         cfg = self.config
+
+        # Tier-aware H reference: strong nodes get higher H_ref
+        H_ref_by_tier = {1: 4, 2: 3, 3: 2, 4: 1}
+        H_ref = H_ref_by_tier.get(node_tier, cfg.H_reference)
+
+        # H penalty: penalize additional epochs beyond tier-appropriate reference
+        H_penalty = cfg.eta_H * max(0, H - H_ref)
+
         reward = (
             -cfg.alpha * T_comp
             - cfg.beta * T_comm
             + cfg.gamma * shapley_phi * delta_F
             + cfg.lambda_fusion * fusion_bonus
             - cfg.mu_overlap * overlap_penalty
+            - H_penalty
         )
         if current_accuracy < cfg.min_acc_threshold:
             reward -= 10.0
@@ -81,6 +102,20 @@ class RewardFunction:
     def compute_overlap_penalty(self, conflict_score: float) -> float:
         """Penalty if layers overlap too much"""
         return conflict_score
+
+    def compute_H_penalty(self, H: int) -> float:
+        """
+        Compute penalty for local epochs H.
+
+        Higher H means more local computation per round, which:
+        - Increases round latency (linearly scales with H)
+        - Causes stragglers in heterogeneous networks
+        - Provides diminishing returns for non-IID data
+
+        Returns negative penalty (cost) that should be subtracted from reward.
+        """
+        cfg = self.config
+        return cfg.eta_H * max(0, H - cfg.H_reference)
 
 
 def layer_compatibility(layer_a: int, layer_b: int) -> float:
