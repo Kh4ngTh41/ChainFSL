@@ -51,33 +51,10 @@ else
     touch "$VENV_DIR/.chainfsl_env_ready"
 fi
 
-# GPU probe
-export CUDA_VISIBLE_DEVICES="-1"
-HEALTHY_GPU=-1
-
-for i in {0..7}; do
-    echo -n "  Testing GPU $i..."
-    if timeout 7s python -c "
-import os
-os.environ['CUDA_VISIBLE_DEVICES']=str($i)
-import torch
-torch.zeros(1).cuda()
-" >/dev/null 2>&1; then
-        HEALTHY_GPU=$i
-        echo " OK!"
-        break
-    else
-        echo " FAILED"
-    fi
-done
-
-if [ "$HEALTHY_GPU" -eq -1 ]; then
-    echo "[WARN] No healthy GPU - forcing CPU mode"
-    export CUDA_VISIBLE_DEVICES=""
-else
-    export CUDA_VISIBLE_DEVICES="$HEALTHY_GPU"
-    echo "[GPU] Using GPU $HEALTHY_GPU"
-fi
+# GPU setup - Use A100 directly without probe (probe fails on A100)
+export CUDA_VISIBLE_DEVICES="${SLURM_JOB_GPUS:-0}"
+echo "[GPU] Using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "[GPU] GPU count: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)"
 
 cd /home/uitchain/datastore/khang/ChainFSL/chainfsl
 
